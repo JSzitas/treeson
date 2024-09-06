@@ -756,5 +756,55 @@ private:
     return bootstrap_indices;
   }
 };
+// TODO(JSzitas): first implt of gradient boosting, actually should also enable
+// https://arxiv.org/pdf/2407.02279
+template <typename TreeType>
+class Treeson {
+public:
+  using FeatureData = typename TreeType::FeatureData;
+  using ResultType = typename TreeType::ResultType;
+
+  GradientBoosting(size_t n_estimators, double learning_rate)
+      : n_estimators(n_estimators), learning_rate(learning_rate) {}
+
+  void fit(const std::vector<FeatureData>& data, const std::vector<ResultType>& targets) {
+    std::vector<ResultType> predictions(targets.size(), 0.0);
+    residuals = targets;  // Initialize residuals with actual targets
+
+    for (size_t i = 0; i < n_estimators; ++i) {
+      auto tree = std::make_unique<TreeType>();
+
+      tree->fit(data, residuals);  // Fit tree on residuals
+      trees.push_back(std::move(tree));
+
+      // Update predictions and residuals
+      auto current_predictions = trees.back()->predict(data);
+      for (size_t j = 0; j < predictions.size(); ++j) {
+        predictions[j] += learning_rate * current_predictions[j];
+        residuals[j] = targets[j] - predictions[j];
+      }
+    }
+  }
+
+  std::vector<ResultType> predict(const std::vector<FeatureData>& data) const {
+    std::vector<ResultType> predictions(data.front().size(), 0.0);
+
+    for (const auto& tree : trees) {
+      auto current_predictions = tree->predict(data);
+      for (size_t i = 0; i < predictions.size(); ++i) {
+        predictions[i] += learning_rate * current_predictions[i];
+      }
+    }
+
+    return predictions;
+  }
+
+private:
+  size_t n_estimators;
+  double learning_rate;
+  std::vector<std::unique_ptr<TreeType>> trees;
+  std::vector<ResultType> residuals;
+};
+
 }
 
