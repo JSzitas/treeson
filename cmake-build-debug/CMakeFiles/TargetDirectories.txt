@@ -1,0 +1,3 @@
+/home/jsco/Desktop/treeson/cmake-build-debug/CMakeFiles/treeson.dir
+/home/jsco/Desktop/treeson/cmake-build-debug/CMakeFiles/edit_cache.dir
+/home/jsco/Desktop/treeson/cmake-build-debug/CMakeFiles/rebuild_cache.dir
