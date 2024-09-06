@@ -731,6 +731,7 @@ public:
     return results;
   }
   [[maybe_unused]] void prune() {
+    // TODO(JSzitas): possibly add warning and print how many trees will be pruned?
     trees.erase(
         std::remove_if(trees.begin(), trees.end(), [](const TreeType &tree) {
           return tree.is_uninformative();
