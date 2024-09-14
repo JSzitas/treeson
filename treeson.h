@@ -17,6 +17,8 @@ namespace utils {
 // Helper function to check if a type is a container
 template <typename T, typename _ = void>
 struct is_container : std::false_type {};
+template <typename T>
+constexpr bool is_container_v = is_container<T>::value;
 
 #ifdef __CLION_IDE__  // Use a macro that the IDE defines
 #pragma clang diagnostic push
@@ -63,6 +65,13 @@ template <typename Rng>
   std::uniform_int_distribution<size_t> dist(0, range - 1);
   return dist(gen);
 }
+template<typename T> struct value_type_extractor;
+template<template<typename...> class Container, typename Element>
+struct value_type_extractor<Container<Element>> {
+  using type [[maybe_unused]] = Element;
+};
+template <typename T>
+using value_type_t = typename value_type_extractor<T>::type;
 }
 namespace containers {
 template <const size_t MaxCategoricalSet> class FixedCategoricalSet {
@@ -170,6 +179,18 @@ struct TreePredictionResult {
       }
     }
     return expanded_results;
+  }
+  template <typename T = ResultType,
+      typename std::enable_if_t<utils::is_container_v<T>, int> = 0>
+  [[maybe_unused]] std::vector<typename ResultType::value_type>
+      flatten() const {
+    std::vector<typename ResultType::value_type> flattened_results;
+    for (const auto& [range, result_container] : results) {
+      for (const auto& element : result_container) {
+        flattened_results.push_back(element);
+      }
+    }
+    return flattened_results;
   }
 };
 }
@@ -467,25 +488,37 @@ public:
     }
     buildTree(data, indices, available_features, 0, 0, indices.size());
   }
-  [[nodiscard]] containers::TreePredictionResult<ResultType>
-  predict(const std::vector<FeatureData> &samples) const noexcept {
+
+  template <const bool FlattenResults = false>
+  [[nodiscard]] auto predict(const std::vector<FeatureData> &samples,
+                             const std::vector<size_t> &indices) const noexcept {
+    if constexpr (FlattenResults) {
+      std::vector<utils::value_type_t<ResultType>> flat_result;
+      predictSamples<true>(0, samples, indices, 0, indices.size(), flat_result);
+      return flat_result;
+    } else {
+      containers::TreePredictionResult<ResultType> result;
+      result.indices = indices;
+      predictSamples<false>(0, samples, indices, 0, indices.size(), result);
+      return result;
+    }
+  }
+  template <const bool FlattenResults = false>
+  [[nodiscard]] auto predict(const std::vector<FeatureData> &samples)
+      const noexcept {
     std::vector<size_t> indices(std::visit(
         [](auto &&arg) -> size_t { return arg.size(); }, samples[0]));
     std::iota(indices.begin(), indices.end(), 0);
-    containers::TreePredictionResult<ResultType> predictionResult;
-    predictionResult.indices = indices;
-    predictSamples(0, samples, indices, 0, indices.size(), predictionResult);
-    return predictionResult;
-  }
-  [[nodiscard]] containers::TreePredictionResult<ResultType>
-  predict(const std::vector<FeatureData> &samples,
-          const std::vector<size_t> &indices) const noexcept {
-    containers::TreePredictionResult<ResultType> predictionResult;
-    // create copy inside prediction result
-    predictionResult.indices = indices;
-    predictSamples(0, samples, predictionResult.indices, 0, indices.size(),
-                   predictionResult);
-    return predictionResult;
+    if constexpr (FlattenResults) {
+      std::vector<utils::value_type_t<ResultType>> flat_result;
+      predictSamples<true>(0, samples, indices, 0, indices.size(), flat_result);
+      return flat_result;
+    } else {
+      containers::TreePredictionResult<ResultType> result;
+      result.indices = indices;
+      predictSamples<false>(0, samples, indices, 0, indices.size(), result);
+      return result;
+    }
   }
 
   [[maybe_unused]] void print_tree_info() const noexcept {
@@ -495,7 +528,7 @@ public:
               << nodes.size() - terminal_values.size() << std::endl;
     std::cout << "Total number of nodes: " << nodes.size() << std::endl;
   }
-  void print_tree_structure() const noexcept { print_node(0, 0); }
+  [[maybe_unused]] void print_tree_structure() const noexcept { print_node(0, 0); }
   void print_terminal_node_values() const noexcept {
     std::cout << "Terminal Node Values:" << std::endl;
     for (size_t i = 0; i < terminal_values.size(); ++i) {
@@ -608,16 +641,25 @@ private:
     print_node(node.parent_child_index[1], depth + 1);
     print_node(node.parent_child_index[2], depth + 1);
   }
+  template <const bool FlattenResults, typename ResultContainer>
   void predictSamples(size_t nodeIndex, const std::vector<FeatureData> &samples,
                       std::vector<size_t> &indices, size_t start, size_t end,
-                      containers::TreePredictionResult<ResultType>
-                          &predictionResult) const noexcept {
+                      ResultContainer &predictionResult) const noexcept {
     const auto &node = nodes[nodeIndex];
-    if (node.parent_child_index[0] == 0 && node.parent_child_index[1] == 0) {
-      predictionResult.results.emplace_back(
-          std::make_pair(start, end), terminal_values[node.terminal_index]);
+    if (node.parent_child_index[1] == 0 && node.parent_child_index[2] == 0) {
+      // leaf node
+      if constexpr (FlattenResults) {
+        const auto &result_container = terminal_values[node.terminal_index];
+        predictionResult.insert(predictionResult.end(),
+                                result_container.begin(),
+                                result_container.end());
+      } else {
+        predictionResult.results.emplace_back(
+            std::make_pair(start, end), terminal_values[node.terminal_index]);
+      }
       return;
     }
+
     auto featureData = samples[node.featureIndex];
     const auto miss_dir = node.getMIADirection();
     size_t mid = start;
@@ -643,12 +685,14 @@ private:
       }
     }
     if (mid > start) {
-      predictSamples(node.parent_child_index[1], samples, indices, start, mid,
-                     predictionResult);
+      predictSamples<FlattenResults>(
+          node.parent_child_index[1], samples,
+          indices, start, mid, predictionResult);
     }
     if (mid < end) {
-      predictSamples(node.parent_child_index[2], samples, indices, mid, end,
-                     predictionResult);
+      predictSamples<FlattenResults>(
+          node.parent_child_index[2], samples,
+          indices, mid, end, predictionResult);
     }
   }
 };
@@ -730,6 +774,70 @@ public:
       results.push_back(tree.predict(samples));    }
     return results;
   }
+  template<typename Accumulator>
+  [[maybe_unused]] void memoryless_predict(
+      const std::vector<FeatureData> &train_data,
+      const std::vector<FeatureData> &predict_data,
+      Accumulator& accumulator,
+      const size_t n_tree,
+      const std::vector<size_t> &nosplit_features,
+      const bool resample = true,
+      const size_t sample_size = 0) {
+    size_t bootstrap_size = sample_size > 0 ? sample_size :
+      std::visit([](auto&& arg) -> size_t { return arg.size(); }, train_data[0]);
+    const bool resample_ = resample && sample_size > 0;
+    if(resample != resample_) {
+      std::cout << "You specified 'resample = true', " <<
+          "but provided 'sample_size = 0'. Quitting, respecify." << std::endl;
+      return;
+    }
+    std::vector<std::thread> threads;
+    std::mutex mtx;
+
+    std::vector<size_t> indices(
+        std::visit([](auto&& arg) -> size_t {
+          return arg.size();
+        }, train_data[0]));
+    std::iota(indices.begin(), indices.end(), 0);
+    // TODO(JSzitas): revisit and validate
+    // do the lazy thing following L'Ecuyer; I am not totally sure it is applicable
+    // see 'Random Numbers for Parallel Computers: Requirements and Methods, With Emphasis on GPUs'
+    // Pierre L’Ecuyer, David Munger, Boris Oreshkin, Richard Simard, p.15
+    // 'A single RNG with a “random” seed for each stream.'
+    // link: https://www.iro.umontreal.ca/~lecuyer/myftp/papers/parallel-rng-imacs.pdf
+    std::vector<size_t> seeds(n_tree);
+    for(auto& seed : seeds) {
+      seed = rng();
+    }
+    for (size_t i = 0; i < n_tree; ++i) {
+      threads.emplace_back([this, &train_data, &predict_data,
+                            &accumulator, &indices, &nosplit_features, &mtx,
+                            resample_, &seeds, bootstrap_size, &i] {
+        // custom random number generator for this tree
+        RNG rng_(seeds[i]);
+        TreeType tree(maxDepth, minNodesize, rng_, terminalNodeFunc, strategy);
+        if (resample_) {
+          tree.fit(train_data, bootstrap_sample(indices, bootstrap_size), nosplit_features);
+        } else {
+          tree.fit(train_data, indices, nosplit_features);
+        }
+        if(tree.is_uninformative()) {
+          // make it clear that this tree does not count
+          // and return; this enables us to avoid pruning
+          i--;
+          return;
+        }
+        // this gets passed onto a vector of thread pool size and reduced in
+        // another thread maybe?
+        auto prediction_result = tree.predict(predict_data);
+        std::lock_guard<std::mutex> lock(mtx);
+        accumulator(prediction_result);
+      });
+    }
+    for (auto &t : threads) {
+      t.join();
+    }
+  }
   [[maybe_unused]] void prune() {
     // TODO(JSzitas): possibly add warning and print how many trees will be pruned?
     trees.erase(
@@ -756,8 +864,9 @@ private:
     return bootstrap_indices;
   }
 };
-// TODO(JSzitas): first implt of gradient boosting, actually should also enable
-// https://arxiv.org/pdf/2407.02279
+/*
+// TODO(JSzitas): first implementation of gradient boosting,
+// actually should also enable https://arxiv.org/pdf/2407.02279
 template <typename TreeType>
 class Treeson {
 public:
@@ -805,6 +914,6 @@ private:
   std::vector<std::unique_ptr<TreeType>> trees;
   std::vector<ResultType> residuals;
 };
-
+*/
 }
 

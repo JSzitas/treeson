@@ -1,0 +1,16 @@
+Package: treeson
+Type: Package
+Title: Bindings for the treeson C++ library
+Version: 1.0.0
+Author: Juraj Szitas
+Maintainer: Juraj Szitas <szitas.juraj13@gmail.com>
+Description: Provides bindings for various classes and functions exposed 
+    from the treeson C++ library, most notably various flavours of random forests.
+License: MIT + file LICENSE
+Encoding: UTF-8
+LazyData: true
+RoxygenNote: 7.3.1
+LinkingTo: 
+    Rcpp
+Imports: 
+    Rcpp

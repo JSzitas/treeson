@@ -87,7 +87,7 @@ int main() {
                         32, double> forest(4, 1, rng, res_functor, strat_obj);
   forest.fit(data, size_t(10), std::vector<size_t>{}, false, size_t(0));
   const auto& predictions_forest = forest.predict(data);
-  forest.prune();
+  //forest.prune();
 
   size_t tree_id = 0;
   for(const auto& pred: predictions_forest) {
