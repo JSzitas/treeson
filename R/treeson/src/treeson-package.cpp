@@ -6,6 +6,19 @@
 using namespace Rcpp;
 using namespace treeson;
 
+struct resultFunc{
+  std::vector<size_t> operator()(
+      std::vector<size_t>& indices,
+      size_t start,
+      size_t end,
+      [[maybe_unused]] const DataType& data) {
+    std::vector<size_t> result(end-start);
+    for(size_t i = start; i < end; i++) {
+      result[i-start] = indices[i];
+    }
+    return result;
+  };
+};
 // Create a template specialization for RandomForest with the required types
 using ResultFunc = resultFunc;  // Custom result function as defined previously
 using RNG = std::mt19937;       // Random number generator

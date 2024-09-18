@@ -11,6 +11,7 @@
 #include <cmath>
 #include <thread>
 #include <mutex>
+#include <type_traits>
 
 namespace treeson {
 namespace utils {
@@ -39,6 +40,24 @@ struct is_container<
                                typename T::const_iterator>,
            void>> : public std::true_type {};
 
+#pragma clang diagnostic push
+#pragma ide diagnostic ignored "OCUnusedTemplateParameterInspection"
+template<typename Accumulator, typename Arg>
+struct is_invocable_with {
+#pragma clang diagnostic push
+#pragma ide diagnostic ignored "NotImplementedFunctions"
+template<typename T>
+  [[maybe_unused]] static auto
+test(T* p) -> decltype((*p)(std::declval<Arg>()), std::true_type{});
+#pragma clang diagnostic pop
+#pragma clang diagnostic push
+#pragma ide diagnostic ignored "NotImplementedFunctions"
+template<typename> static auto test(...) -> std::false_type;
+#pragma clang diagnostic pop
+static constexpr bool value =
+    std::is_same_v<decltype(test<Accumulator>(0)), std::true_type>;
+};
+#pragma clang diagnostic pop
 // Utility function to print elements of a container
 template <typename T>
 void print_container(std::ostream &os, const T &container) {
@@ -198,7 +217,7 @@ namespace splitters {
 
 template <typename RNG, typename scalar_t = double,
           const size_t MaxCategoricalSet = 10>
-class ExtremelyRandomizedStrategy {
+class [[maybe_unused]] ExtremelyRandomizedStrategy {
 public:
   void select_split(
       const std::vector<
@@ -520,6 +539,48 @@ public:
       return result;
     }
   }
+  template <const bool FlattenResults = false>
+  [[maybe_unused]] [[nodiscard]] auto predictWithoutFeature(
+      const std::vector<FeatureData> &samples,
+      const std::vector<size_t> &indices,
+      const size_t excludedFeature) const noexcept {
+    if constexpr (FlattenResults) {
+      std::vector<utils::value_type_t<ResultType>> flat_result;
+      predictSamplesWithoutFeature<true>(0, samples, indices, 0, indices.size(), flat_result, excludedFeature);
+      return flat_result;
+    } else {
+      containers::TreePredictionResult<ResultType> result;
+      result.indices = indices;
+      predictSamplesWithoutFeature<false>(0, samples, indices, 0, indices.size(), result, excludedFeature);
+      return result;
+    }
+  }
+  template <const bool FlattenResults = false>
+  [[maybe_unused]] [[nodiscard]] auto predictWithoutFeature(
+      const std::vector<FeatureData> &samples,
+      const size_t excludedFeature) const noexcept {
+    std::vector<size_t> indices(std::visit(
+        [](auto &&arg) -> size_t { return arg.size(); }, samples[0]));
+    std::iota(indices.begin(), indices.end(), 0);
+    if constexpr (FlattenResults) {
+      std::vector<utils::value_type_t<ResultType>> flat_result;
+      predictSamplesWithoutFeature<true>(0, samples, indices, 0, indices.size(), flat_result, excludedFeature);
+      return flat_result;
+    } else {
+      containers::TreePredictionResult<ResultType> result;
+      result.indices = indices;
+      predictSamplesWithoutFeature<false>(0, samples, indices, 0, indices.size(), result, excludedFeature);
+      return result;
+    }
+  }
+
+  [[maybe_unused]] std::unordered_set<size_t> used_features() const {
+    std::unordered_set<size_t> features;
+    for (const auto& node : nodes) {
+        features.insert(node.featureIndex);
+    }
+    return features;
+  }
 
   [[maybe_unused]] void print_tree_info() const noexcept {
     std::cout << "Number of terminal nodes: " << terminal_values.size()
@@ -695,6 +756,69 @@ private:
           indices, mid, end, predictionResult);
     }
   }
+  template <const bool FlattenResults, typename ResultContainer>
+  void predictSamplesWithoutFeature(
+      const size_t nodeIndex, const std::vector<FeatureData> &samples,
+      std::vector<size_t> &indices, const size_t start, const size_t end,
+      ResultContainer &predictionResult, const size_t excludedFeature
+      ) const noexcept {
+    const auto &node = nodes[nodeIndex];
+    if (node.parent_child_index[1] == 0 && node.parent_child_index[2] == 0) {
+      // leaf node
+      if constexpr (FlattenResults) {
+        const auto &result_container = terminal_values[node.terminal_index];
+        predictionResult.insert(
+            predictionResult.end(), result_container.begin(), result_container.end());
+      } else {
+        predictionResult.results.emplace_back(
+            std::make_pair(start, end), terminal_values[node.terminal_index]);
+      }
+      return;
+    }
+
+    if (node.featureIndex == excludedFeature) {
+      // Ignore the current split if feature matches the excludedFeature
+      predictSamplesWithoutFeature<FlattenResults>(node.parent_child_index[1], samples, indices, start, end, predictionResult, excludedFeature);
+      predictSamplesWithoutFeature<FlattenResults>(node.parent_child_index[2], samples, indices, start, end, predictionResult, excludedFeature);
+      return;
+    }
+
+    auto featureData = samples[node.featureIndex];
+    const auto miss_dir = node.getMIADirection();
+    size_t mid = start;
+    if (node.isCategorical()) {
+      const auto &catSet = node.getCategoricalSet();
+      const auto &catData = std::get<std::vector<size_t>>(featureData);
+      for (size_t i = start; i < end; ++i) {
+        const auto &val = catData[indices[i]];
+        if (catSet.contains(val)) {
+          std::swap(indices[i], indices[mid]);
+          ++mid;
+        }
+      }
+    } else {
+      const auto &numThreshold = node.getNumericThreshold();
+      const auto &numData = std::get<std::vector<scalar_t>>(featureData);
+      for (size_t i = start; i < end; ++i) {
+        const auto &val = numData[indices[i]];
+        if ((val <= numThreshold) || (std::isnan(val) && miss_dir)) {
+          std::swap(indices[i], indices[mid]);
+          ++mid;
+        }
+      }
+    }
+
+    if (mid > start) {
+      predictSamplesWithoutFeature<FlattenResults>(
+          node.parent_child_index[1], samples, indices,
+          start, mid, predictionResult, excludedFeature);
+    }
+    if (mid < end) {
+      predictSamplesWithoutFeature<FlattenResults>(
+          node.parent_child_index[2], samples, indices,
+          mid, end, predictionResult, excludedFeature);
+    }
+  }
 };
 
 template <typename ResultF, typename RNG, typename SplitStrategy,
@@ -776,9 +900,9 @@ public:
   }
   template<typename Accumulator>
   [[maybe_unused]] void memoryless_predict(
+      Accumulator& accumulator,
       const std::vector<FeatureData> &train_data,
       const std::vector<FeatureData> &predict_data,
-      Accumulator& accumulator,
       const size_t n_tree,
       const std::vector<size_t> &nosplit_features,
       const bool resample = true,
@@ -824,14 +948,21 @@ public:
         if(tree.is_uninformative()) {
           // make it clear that this tree does not count
           // and return; this enables us to avoid pruning
+          std::lock_guard<std::mutex> lock(mtx);
           i--;
           return;
         }
-        // this gets passed onto a vector of thread pool size and reduced in
-        // another thread maybe?
-        auto prediction_result = tree.predict(predict_data);
-        std::lock_guard<std::mutex> lock(mtx);
-        accumulator(prediction_result);
+        // use compile-time check to determine which predict to call
+        if constexpr (utils::is_invocable_with<Accumulator,
+                                                std::vector<utils::value_type_t<typename TreeType::ResultType>>>::value) {
+          auto prediction_result = tree.template predict<true>(predict_data, indices);
+          std::lock_guard<std::mutex> lock(mtx);
+          accumulator(prediction_result);
+        } else {
+          auto prediction_result = tree.template predict<false>(predict_data, indices);
+          std::lock_guard<std::mutex> lock(mtx);
+          accumulator(prediction_result);
+        }
       });
     }
     for (auto &t : threads) {
@@ -847,6 +978,117 @@ public:
         trees.end()
     );
   }
+  // Feature importance method
+  template<typename Accumulator, typename Importance>
+  [[maybe_unused]] void feature_importance(
+      const std::vector<FeatureData> &train_data,
+      const std::vector<FeatureData> &predict_data,
+      const size_t n_tree,
+      const std::vector<size_t> &nosplit_features,
+      const bool resample = true,
+      const size_t sample_size = 0) {
+    size_t bootstrap_size = sample_size > 0 ? sample_size :
+                                            std::visit([](auto&& arg) -> size_t { return arg.size(); }, train_data[0]);
+    const bool resample_ = resample && sample_size > 0;
+    if (resample != resample_) {
+      std::cout << "You specified 'resample = true', " <<
+          "but provided 'sample_size = 0'. Quitting, respecify." << std::endl;
+      return;
+    }
+
+    std::vector<std::thread> threads;
+    std::mutex mtx;
+
+    std::vector<size_t> indices(
+        std::visit([](auto&& arg) -> size_t {
+          return arg.size();
+        }, train_data[0]));
+    std::iota(indices.begin(), indices.end(), 0);
+
+    std::vector<size_t> seeds(n_tree);
+    for(auto& seed : seeds) {
+      seed = rng();
+    }
+    std::vector<Accumulator> accumulators(train_data.size() + 1 -
+                                          nosplit_features.size());
+
+    for (size_t i = 0; i < n_tree; ++i) {
+      threads.emplace_back([this, &train_data, &predict_data, &accumulators,
+                            &indices, &nosplit_features, &mtx, resample_, &seeds,
+                            bootstrap_size, &i] {
+        RNG rng_(seeds[i]);
+        TreeType tree(maxDepth, minNodesize, rng_, terminalNodeFunc, strategy);
+        if (resample_) {
+          tree.fit(train_data,
+                   bootstrap_sample(indices, bootstrap_size),
+                   nosplit_features);
+        } else {
+          tree.fit(train_data,
+                   indices,
+                   nosplit_features);
+        }
+        if (tree.is_uninformative()) {
+          std::lock_guard<std::mutex> lock(mtx);
+          i--;
+          return;
+        }
+
+        using res_type = decltype(tree.template predict<true>(
+            predict_data, indices));
+        auto used_features = tree.used_features();
+        // we only have to iterate over the above; thus we are
+        // only updating certain accumulators
+        std::vector<res_type> updates(used_features.size());
+        // compute baseline - update first accumulator
+        if constexpr (utils::is_invocable_with<
+                          Accumulator,
+                          std::vector<utils::value_type_t<
+                              typename TreeType::ResultType>>>::value) {
+          updates[0] = tree.template predict<true>(
+              predict_data, indices);
+        } else {
+          updates[0] = tree.template predict<false>(
+              predict_data, indices);
+        }
+        size_t feature_i = 0;
+        for(const auto feature : used_features) {
+          // Use compile-time check to determine which predict to call
+          if constexpr (utils::is_invocable_with<
+                            Accumulator,
+                            std::vector<utils::value_type_t<
+                                typename TreeType::ResultType>>>::value) {
+            updates[feature_i++] = tree.template predictWithoutFeature<true>(
+                predict_data, indices, feature);
+          } else {
+            updates[feature_i++] = tree.template predictWithoutFeature<false>(
+                predict_data, indices, feature);
+          }
+        }
+        // take mutex, update accumulators
+        std::lock_guard<std::mutex> lock(mtx);
+        accumulators[0](updates[0]);
+        for(feature_i = 1; feature_i < used_features.size() + 1; feature_i++) {
+          accumulators[used_features[feature_i - 1]](updates[feature_i]);
+        }
+      });
+    }
+    for (auto &t : threads) {
+      t.join();
+    }
+    // convert from accumulator values to importances
+    Importance importance;
+    // whatever the invocation over two accumulators produces :)
+    std::vector<decltype(importance(accumulators.front().result(),
+                                    accumulators.front().result()))>
+        importances;
+    const auto baseline_results = accumulators.front().result();
+    for (size_t feature_i = 0; feature_i < accumulators.size()-1; feature_i++) {
+      const auto feature_results = accumulators[feature_i+1].result();
+      importances[feature_i] = importance(baseline_results, feature_results);
+    }
+    return importances;
+  }
+
 private:
   const size_t maxDepth, minNodesize;
   RNG& rng;

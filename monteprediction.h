@@ -1,8 +1,0 @@
-//
-// Created by jsco on 9/9/24.
-//
-
-#ifndef TREESON_MONTEPREDICTION_H
-#define TREESON_MONTEPREDICTION_H
-
-#endif // TREESON_MONTEPREDICTION_H
