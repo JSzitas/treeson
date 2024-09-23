@@ -5,6 +5,8 @@
 #include <algorithm>
 #include <unordered_set>
 #include <random>
+#include <iostream>
+
 template<typename ResultType>
 class IntersectionSampler {
 public:
@@ -56,33 +58,45 @@ public:
     return intersection;
   }
 };
-
+//TODO: This should be trivial to vectorise
 template<typename scalar_t> struct WelfordMean{
   scalar_t mean = 0.0;
-  size_t i = 0;
+  size_t i = 1;
+  WelfordMean() : mean(0.0), i(1) {}
   void operator()(const scalar_t x) {
-    mean += (x - mean)/static_cast<scalar_t>(i);
+    mean += (x - mean)/static_cast<scalar_t>(i++);
   }
   scalar_t result() const {
     return mean;
   }
+  size_t index() const {
+    return i;
+  }
 };
-template<typename scalar_t,
-          typename TreePredictionResult> struct MultitargetMeanReducer {
+template<typename scalar_t> struct MultitargetMeanReducer {
   std::vector<WelfordMean<scalar_t>> targets;
-  explicit MultitargetMeanReducer(const size_t n_targets) {
-    targets = std::vector<WelfordMean<scalar_t>>(n_targets);
+  explicit MultitargetMeanReducer(const size_t n_targets, const size_t n_preds) {
+    targets = std::vector<WelfordMean<scalar_t>>(n_targets*n_preds);
   }
   void operator()(const std::vector<scalar_t>& predictions) {
     size_t i = 0;
     for(const auto & val: predictions) {
-      targets[i++ % targets.size()](val);
+      //std::cout << i++ << ',';
+      targets[i++](val);
     }
+    //std::cout << "Targets size: "<< targets.size() << " i: "<< i;
   }
   std::vector<scalar_t> result() const {
-    std::vector<scalar_t> res(targets.size());
+    std::vector<scalar_t> res;
     for(const auto& target : targets) {
       res.push_back(target.result());
+    }
+    return res;
+  }
+  std::vector<size_t> index() const {
+    std::vector<size_t> res;
+    for(const auto& target : targets) {
+      res.push_back(target.index());
     }
     return res;
   }

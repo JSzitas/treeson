@@ -12,6 +12,9 @@
 #include <thread>
 #include <mutex>
 #include <type_traits>
+#include <condition_variable>
+#include <functional>
+#include <queue>
 
 namespace treeson {
 namespace utils {
@@ -91,6 +94,59 @@ struct value_type_extractor<Container<Element>> {
 };
 template <typename T>
 using value_type_t = typename value_type_extractor<T>::type;
+}
+namespace threading {
+// Class that represents a simple thread pool
+class [[maybe_unused]] ThreadPool {
+  std::vector<std::thread> threads_;
+  std::queue<std::function<void()> > tasks_;
+  std::mutex queue_mutex_;
+  std::condition_variable cv_;
+  bool stop_ = false;
+public:
+  explicit ThreadPool(const size_t num_threads
+             = std::thread::hardware_concurrency())
+  {
+    for (size_t i = 0; i < num_threads; ++i) {
+      threads_.emplace_back([this] {
+        while (true) {
+          std::function<void()> task;
+          {
+            std::unique_lock<std::mutex> lock(queue_mutex_);
+            cv_.wait(lock, [this] {
+              return !tasks_.empty() || stop_;
+            });
+            if (stop_ && tasks_.empty()) {
+              return;
+            }
+            task = std::move(tasks_.front());
+            tasks_.pop();
+          }
+          task();
+        }
+      });
+    }
+  }
+  ~ThreadPool()
+  {
+    {
+      std::unique_lock<std::mutex> lock(queue_mutex_);
+      stop_ = true;
+    }
+    cv_.notify_all();
+    for (auto& thread : threads_) {
+      thread.join();
+    }
+  }
+  [[maybe_unused]] void enqueue(std::function<void()> task)
+  {
+    {
+      std::unique_lock<std::mutex> lock(queue_mutex_);
+      tasks_.emplace(std::move(task));
+    }
+    cv_.notify_one();
+  }
+};
 }
 namespace containers {
 template <const size_t MaxCategoricalSet> class FixedCategoricalSet {
@@ -510,7 +566,7 @@ public:
 
   template <const bool FlattenResults = false>
   [[nodiscard]] auto predict(const std::vector<FeatureData> &samples,
-                             const std::vector<size_t> &indices) const noexcept {
+                             std::vector<size_t> &indices) const noexcept {
     if constexpr (FlattenResults) {
       std::vector<utils::value_type_t<ResultType>> flat_result;
       predictSamples<true>(0, samples, indices, 0, indices.size(), flat_result);
@@ -542,7 +598,7 @@ public:
   template <const bool FlattenResults = false>
   [[maybe_unused]] [[nodiscard]] auto predictWithoutFeature(
       const std::vector<FeatureData> &samples,
-      const std::vector<size_t> &indices,
+      std::vector<size_t> &indices,
       const size_t excludedFeature) const noexcept {
     if constexpr (FlattenResults) {
       std::vector<utils::value_type_t<ResultType>> flat_result;
@@ -844,49 +900,55 @@ public:
            const bool resample = true,
            const size_t sample_size = 0) {
     trees.reserve(n_tree);
-    size_t bootstrap_size = sample_size > 0 ? sample_size :
-      std::visit([](auto&& arg) -> size_t { return arg.size(); }, data[0]);
+    size_t bootstrap_size =
+        sample_size > 0
+            ? sample_size
+            : std::visit([](auto &&arg) -> size_t { return arg.size(); },
+                         data[0]);
     const bool resample_ = resample && sample_size > 0;
-    if(resample != resample_) {
-      std::cout << "You specified 'resample = true', " <<
-          "but provided 'sample_size = 0'. Quitting, respecify." << std::endl;
+    if (resample != resample_) {
+      std::cout << "You specified 'resample = true', "
+                << "but provided 'sample_size = 0'. Quitting, respecify."
+                << std::endl;
       return;
     }
-    std::vector<std::thread> threads;
-    std::mutex mtx;
-
-    std::vector<size_t> indices(
-        std::visit([](auto&& arg) -> size_t {
-          return arg.size();
-        }, data[0]));
-    std::iota(indices.begin(), indices.end(), 0);
     // TODO(JSzitas): revisit and validate
-    // do the lazy thing following L'Ecuyer; I am not totally sure it is applicable
-    // see 'Random Numbers for Parallel Computers: Requirements and Methods, With Emphasis on GPUs'
-    // Pierre L’Ecuyer, David Munger, Boris Oreshkin, Richard Simard, p.15
-    // 'A single RNG with a “random” seed for each stream.'
-    // link: https://www.iro.umontreal.ca/~lecuyer/myftp/papers/parallel-rng-imacs.pdf
+    // do the lazy thing following L'Ecuyer; I am not totally sure it is applicable see 'Random Numbers for Parallel Computers: Requirements and Methods, With Emphasis on GPUs' Pierre L’Ecuyer, David Munger, Boris Oreshkin, Richard Simard, p.15 'A single RNG with a “random” seed for each stream.' link: https://www.iro.umontreal.ca/~lecuyer/myftp/papers/parallel-rng-imacs.pdf
     std::vector<size_t> seeds(n_tree);
-    for(auto& seed : seeds) {
+    for (auto &seed : seeds) {
       seed = rng();
     }
+#ifndef NO_MULTITHREAD
+    threading::ThreadPool pool;
+#endif
     for (size_t i = 0; i < n_tree; ++i) {
-      threads.emplace_back([this, &data, &indices, &nosplit_features, &mtx,
-                            resample_, &seeds, bootstrap_size, i] {
+#ifdef NO_MULTITHREAD
+      [this, &train_data, &predict_data, &accumulator,
+       &nosplit_features, //&mtx,
+       resample_, &seeds, bootstrap_size, &i]() {
+#else
+      pool.enqueue([this, &data, &nosplit_features, //&mtx,
+                    resample_, &seeds, bootstrap_size, &i] {
+#endif
+        std::vector<size_t> indices(std::visit(
+            [](auto &&arg) -> size_t { return arg.size(); }, data[0]));
+        std::iota(indices.begin(), indices.end(), 0);
         // custom random number generator for this tree
         RNG rng_(seeds[i]);
         TreeType tree(maxDepth, minNodesize, rng_, terminalNodeFunc, strategy);
         if (resample_) {
-          tree.fit(data, bootstrap_sample(indices, bootstrap_size), nosplit_features);
+          tree.fit(data, bootstrap_sample(indices, bootstrap_size),
+                   nosplit_features);
         } else {
           tree.fit(data, indices, nosplit_features);
         }
-        std::lock_guard<std::mutex> lock(mtx);
         trees.emplace_back(tree);
-      });
-    }
-    for (auto &t : threads) {
-      t.join();
+      }
+#ifdef NO_MULTITHREAD
+      ();
+#else
+      );
+#endif
     }
   }
 
@@ -915,14 +977,6 @@ public:
           "but provided 'sample_size = 0'. Quitting, respecify." << std::endl;
       return;
     }
-    std::vector<std::thread> threads;
-    std::mutex mtx;
-
-    std::vector<size_t> indices(
-        std::visit([](auto&& arg) -> size_t {
-          return arg.size();
-        }, train_data[0]));
-    std::iota(indices.begin(), indices.end(), 0);
     // TODO(JSzitas): revisit and validate
     // do the lazy thing following L'Ecuyer; I am not totally sure it is applicable
     // see 'Random Numbers for Parallel Computers: Requirements and Methods, With Emphasis on GPUs'
@@ -933,10 +987,26 @@ public:
     for(auto& seed : seeds) {
       seed = rng();
     }
+#ifndef NO_MULTITHREAD
+    threading::ThreadPool pool;
+#endif
     for (size_t i = 0; i < n_tree; ++i) {
-      threads.emplace_back([this, &train_data, &predict_data,
-                            &accumulator, &indices, &nosplit_features, &mtx,
-                            resample_, &seeds, bootstrap_size, &i] {
+#ifdef NO_MULTITHREAD
+      [this, &train_data, &predict_data,
+        &accumulator, &nosplit_features, //&mtx,
+        resample_, &seeds, bootstrap_size, &i]() {
+#else
+      pool.enqueue([this, &train_data, &predict_data,
+                          &accumulator, &nosplit_features, //&mtx,
+                          resample_, &seeds, bootstrap_size, &i] {
+#endif
+        std::vector<size_t> indices(
+            std::visit([](auto&& arg) -> size_t {
+              return arg.size();
+            }, train_data[0]));
+        std::iota(indices.begin(), indices.end(), 0);
+
+        //if(i % 500 == 0) std::cout << "Tree: " << i << std::endl;
         // custom random number generator for this tree
         RNG rng_(seeds[i]);
         TreeType tree(maxDepth, minNodesize, rng_, terminalNodeFunc, strategy);
@@ -948,25 +1018,27 @@ public:
         if(tree.is_uninformative()) {
           // make it clear that this tree does not count
           // and return; this enables us to avoid pruning
-          std::lock_guard<std::mutex> lock(mtx);
-          i--;
+          //std::lock_guard<std::mutex> lock(mtx);
+          //i--;
           return;
         }
         // use compile-time check to determine which predict to call
         if constexpr (utils::is_invocable_with<Accumulator,
-                                                std::vector<utils::value_type_t<typename TreeType::ResultType>>>::value) {
+                                                std::vector<utils::value_type_t<ResultType>>>::value) {
           auto prediction_result = tree.template predict<true>(predict_data, indices);
-          std::lock_guard<std::mutex> lock(mtx);
+          //std::lock_guard<std::mutex> lock(mtx);
           accumulator(prediction_result);
         } else {
           auto prediction_result = tree.template predict<false>(predict_data, indices);
-          std::lock_guard<std::mutex> lock(mtx);
+          //std::lock_guard<std::mutex> lock(mtx);
           accumulator(prediction_result);
         }
-      });
-    }
-    for (auto &t : threads) {
-      t.join();
+      }
+#ifdef NO_MULTITHREAD
+      ();
+#else
+      );
+#endif
     }
   }
   [[maybe_unused]] void prune() {
@@ -979,8 +1051,10 @@ public:
     );
   }
   // Feature importance method
+  // TODO(JSzitas): Currently most definitely broken, fix concurrency before
+  // you think about using this, see how its done above
   template<typename Accumulator, typename Importance>
-  [[maybe_unused]] void feature_importance(
+  [[maybe_unused]] auto feature_importance(
       const std::vector<FeatureData> &train_data,
       const std::vector<FeatureData> &predict_data,
       const size_t n_tree,
