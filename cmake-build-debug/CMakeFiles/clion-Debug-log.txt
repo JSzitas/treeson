@@ -1,4 +1,12 @@
 /home/jsco/.local/share/JetBrains/Toolbox/apps/clion/bin/cmake/linux/x64/bin/cmake -DCMAKE_BUILD_TYPE=Debug -DCMAKE_MAKE_PROGRAM=/home/jsco/.local/share/JetBrains/Toolbox/apps/clion/bin/ninja/linux/x64/ninja -DCMAKE_C_COMPILER=/usr/bin/clang -DCMAKE_CXX_COMPILER=/usr/bin/clang++ -G Ninja -S /home/jsco/Desktop/treeson -B /home/jsco/Desktop/treeson/cmake-build-debug
+-- Arrow version: 18.0.0
+-- Found the Arrow shared library: /usr/local/lib/libarrow.so.1800.0.0
+-- Found the Arrow import library: ARROW_IMPORT_LIB-NOTFOUND
+-- Found the Arrow static library: /usr/local/lib/libarrow.a
+-- Parquet version: 18.0.0
+-- Found the Parquet shared library: /usr/local/lib/libparquet.so.1800.0.0
+-- Found the Parquet import library: PARQUET_IMPORT_LIB-NOTFOUND
+-- Found the Parquet static library: /usr/local/lib/libparquet.a
 -- Configuring done (0.0s)
 -- Generating done (0.0s)
 -- Build files have been written to: /home/jsco/Desktop/treeson/cmake-build-debug
