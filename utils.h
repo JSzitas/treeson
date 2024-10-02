@@ -20,7 +20,8 @@ public:
 
   template<const bool headers,
            const bool row_names>
-  static std::vector<FeatureData> load_data(const std::string& filename) {
+  static std::vector<FeatureData> load_data(const std::string& filename,
+                                            const size_t max_lines = 10000) {
     std::vector<FeatureData> data;
     std::ifstream file(filename);
 
@@ -31,7 +32,11 @@ public:
     std::vector<std::vector<std::string>> columns;
     // skip headers
     if constexpr(headers) std::getline(file, line);
+    size_t n_line = 0;
     while (std::getline(file, line)) {
+      if(n_line > max_lines) {
+        break;
+      }
       std::istringstream ss(line);
       std::string cell;
       size_t col_index = 0;
@@ -47,6 +52,7 @@ public:
         columns[col_index].push_back(cell);
         ++col_index;
       }
+      n_line++;
     }
     file.close();
     for (const auto& column : columns) {

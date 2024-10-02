@@ -8,7 +8,7 @@
 int main() {
   // Simplified pseudocode for testing:
 
-  using DataType = std::vector<std::variant<std::vector<size_t>, std::vector<double>>>;
+  using DataType = std::vector<std::variant<std::vector<int>, std::vector<double>>>;
 
   // RNG and Result function
   std::mt19937 rng(22); // NOLINT(*-msc51-cpp)
@@ -26,14 +26,15 @@ int main() {
     };
   };
   // Mock result function
-  using strat = treeson::splitters::ExtremelyRandomizedStrategy<std::mt19937, double, 32>;
+  using strat = treeson::splitters::ExtremelyRandomizedStrategy<std::mt19937,
+                                                                double, int, 32>;
 
 
   auto res_functor = resultFunc{};
   auto strat_obj = strat{};
   // Creating tree
   treeson::RandomTree<resultFunc, std::mt19937, strat,
-                          32, double> tree(3, 1, rng, res_functor, strat_obj);
+                          32, double, int> tree(3, 1, rng, res_functor, strat_obj);
 
   // Example data (simplified)
   /*
@@ -49,8 +50,8 @@ int main() {
       std::vector<double>{1.5, 1.4, std::nan(""),1.6, 0.5, 0.4, 0.6, 3.5, 3.4, 3.6, 2.5, 2.4, 2.6, 4.5, 4.4, 4.6},
 
       // Categorical features
-      std::vector<size_t>{1, 2, 3, 1, 2, 3, 1, 1, 1, 3, 1, 2, 3, 1, 2, 3},
-      std::vector<size_t>{4, 5, 6, 4, 5, 6, 4, 5, 3, 6, 4, 5, 6, 4, 5, 6}
+      std::vector<int>{1, 2, 3, 1, 2, 3, 1, 1, 1, 3, 1, 2, 3, 1, 2, 3},
+      std::vector<int>{4, 5, 6, 4, 5, 6, 4, 5, 3, 6, 4, 5, 6, 4, 5, 6}
   };
   std::vector<size_t> indices(std::get<std::vector<double>>(data[0]).size());
   std::iota(indices.begin(), indices.end(), 0);
@@ -70,7 +71,6 @@ int main() {
   const auto& predictions = tree.predict(data);
   std::cout << "Prediction successful" << std::endl;
 
-
   // Print predictions
   std::cout << "Predictions: " << std::endl;
   size_t pred_id = 0;
@@ -84,7 +84,7 @@ int main() {
   std::cout << std::endl;
 
   treeson::RandomForest<resultFunc, std::mt19937, strat,
-                        32, double> forest(4, 1, rng, res_functor, strat_obj);
+                        32, double, int> forest(4, 1, rng, res_functor, strat_obj);
   forest.fit(data, size_t(10), std::vector<size_t>{}, false, size_t(0));
   const auto& predictions_forest = forest.predict(data);
   //forest.prune();
@@ -101,11 +101,6 @@ int main() {
       std::cout << "|\n";
     }
   }
-
-
-
-
-
 
   return 0;
 }

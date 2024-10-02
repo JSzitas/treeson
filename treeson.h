@@ -5,6 +5,7 @@
 #include <optional>
 #include <algorithm> // for std::find
 #include <limits>
+#include <set>
 #include <random>
 #include <unordered_set>
 #include <numeric> // for std::iota
@@ -61,7 +62,7 @@ template<typename T>
   return std::true_type{};
 };
 template <typename> static auto test(...) -> std::false_type {};
-static constexpr bool value = std::is_same_v<decltype(test<Accumulator>(0)), std::true_type>;
+[[maybe_unused]] static constexpr bool value = std::is_same_v<decltype(test<Accumulator>(0)), std::true_type>;
 };
 // Utility function to print elements of a container
 template <typename T>
@@ -273,16 +274,17 @@ public:
 };
 }
 namespace containers {
-template <const size_t MaxCategoricalSet> class FixedCategoricalSet {
+template <const size_t MaxCategoricalSet,
+    typename integral_t> class FixedCategoricalSet {
 public:
-  std::array<size_t, MaxCategoricalSet> data{};
+  std::array<integral_t, MaxCategoricalSet> data{};
   size_t size = 0;
   [[nodiscard]] bool contains(const size_t value) const noexcept {
     return std::find(data.begin(), data.begin() + size, value) !=
            data.begin() + size;
   }
   // possibly just void?
-  bool add(const size_t value) noexcept {
+  bool add(const integral_t value) noexcept {
     if (size < MaxCategoricalSet) {
       data[size++] = value;
       return true;
@@ -291,10 +293,11 @@ public:
   }
 };
 
-template <typename scalar_t, const size_t MaxCategoricalSet> class Node {
+template <typename scalar_t, typename integral_t,
+          const size_t MaxCategoricalSet> class Node {
 public:
   size_t featureIndex;
-  std::variant<scalar_t, FixedCategoricalSet<MaxCategoricalSet>> threshold;
+  std::variant<scalar_t, FixedCategoricalSet<MaxCategoricalSet, integral_t>> threshold;
   size_t terminal_index = std::numeric_limits<size_t>::max();
   std::array<size_t, 3> parent_child_index = {0, 0, 0}; // Parent, Left, Right
   bool missing_goes_right;
@@ -302,12 +305,12 @@ public:
       : featureIndex(std::numeric_limits<size_t>::max()), terminal_index(0),
         missing_goes_right(false) {}
   [[nodiscard]] bool isCategorical() const noexcept {
-    return std::holds_alternative<FixedCategoricalSet<MaxCategoricalSet>>(
+    return std::holds_alternative<FixedCategoricalSet<MaxCategoricalSet, integral_t>>(
         threshold);
   }
-  const FixedCategoricalSet<MaxCategoricalSet> &
+  const FixedCategoricalSet<MaxCategoricalSet, integral_t> &
   getCategoricalSet() const noexcept {
-    return std::get<FixedCategoricalSet<MaxCategoricalSet>>(threshold);
+    return std::get<FixedCategoricalSet<MaxCategoricalSet, integral_t>>(threshold);
   }
   scalar_t getNumericThreshold() const noexcept {
     return std::get<scalar_t>(threshold);
@@ -368,7 +371,17 @@ template <typename ResultType>
 struct TreePredictionResult {
   std::vector<size_t> indices;
   std::vector<std::pair<std::pair<size_t, size_t>, ResultType>> results;
-
+  [[maybe_unused]] [[nodiscard]]
+  size_t result_size() const {
+    return results.size();
+  }
+  [[maybe_unused]] std::tuple<size_t, size_t, ResultType>
+      get_result_view(const size_t which_result) const {
+    return {results[which_result].first.first,
+            results[which_result].first.second,
+            results[which_result].second
+           };
+  }
   // Expands the result back into the full prediction vector
   [[maybe_unused]] std::vector<ResultType> expand_result() const {
     std::vector<ResultType> expanded_results(indices.size());
@@ -396,15 +409,16 @@ struct TreePredictionResult {
 namespace splitters {
 
 template <typename RNG, typename scalar_t = double,
+          typename integral_t = size_t,
           const size_t MaxCategoricalSet = 10>
 class [[maybe_unused]] ExtremelyRandomizedStrategy {
 public:
   void select_split(
       const std::vector<
-          std::variant<std::vector<size_t>, std::vector<scalar_t>>> &data,
+          std::variant<std::vector<integral_t>, std::vector<scalar_t>>> &data,
       std::vector<size_t> &indices,
       const std::vector<size_t> &available_features, size_t start, size_t end,
-      containers::Node<scalar_t, MaxCategoricalSet> &node, RNG &rng) const {
+      containers::Node<scalar_t, integral_t, MaxCategoricalSet> &node, RNG &rng) const {
     const size_t feature =
         available_features[utils::select_from_range(available_features.size(), rng)];
     auto [mia_direction, threshold] = std::visit(
@@ -416,7 +430,7 @@ public:
 
 private:
   struct FeatureVisitor {
-    const std::vector<std::variant<std::vector<size_t>, std::vector<scalar_t>>>
+    const std::vector<std::variant<std::vector<integral_t>, std::vector<scalar_t>>>
         &data;
     const size_t feature;
     std::vector<size_t> &indices;
@@ -424,13 +438,13 @@ private:
     size_t end;
     RNG &rng;
 
-    std::pair<bool, std::variant<scalar_t, containers::FixedCategoricalSet<MaxCategoricalSet>>>
+    std::pair<bool, std::variant<scalar_t, containers::FixedCategoricalSet<MaxCategoricalSet, integral_t>>>
     operator()(const std::vector<scalar_t> &) const noexcept {
       return {selectMIADirection(), selectRandomThreshold()};
     }
 
-    std::pair<bool, std::variant<scalar_t, containers::FixedCategoricalSet<MaxCategoricalSet>>>
-    operator()(const std::vector<size_t> &) const noexcept {
+    std::pair<bool, std::variant<scalar_t, containers::FixedCategoricalSet<MaxCategoricalSet, integral_t>>>
+    operator()(const std::vector<integral_t> &) const noexcept {
       return {selectMIADirection(), selectRandomCategoricalSet()};
     }
 
@@ -454,21 +468,22 @@ private:
       return std::bernoulli_distribution(0.5)(rng);
     }
 
-    containers::FixedCategoricalSet<MaxCategoricalSet> selectRandomCategoricalSet() const noexcept {
-      std::unordered_set<size_t> uniqueValues;
+    containers::FixedCategoricalSet<MaxCategoricalSet, integral_t>
+        selectRandomCategoricalSet() const noexcept {
+      std::unordered_set<integral_t> uniqueValues;
       const auto &categoricalData =
-          std::get<std::vector<size_t>>(data[feature]);
+          std::get<std::vector<integral_t>>(data[feature]);
       for (size_t i = start; i < end; ++i) {
         uniqueValues.insert(categoricalData[indices[i]]);
       }
       const size_t n_selected = utils::select_from_range(uniqueValues.size(), rng);
-      std::array<size_t, MaxCategoricalSet> shuffle_temp;
+      std::array<integral_t, MaxCategoricalSet> shuffle_temp;
       size_t i = 0;
       for (const auto &val : uniqueValues) {
         shuffle_temp[i++] = val;
       }
       std::shuffle(shuffle_temp.begin(), shuffle_temp.begin() + i, rng);
-      containers::FixedCategoricalSet<MaxCategoricalSet> categoricalSet;
+      containers::FixedCategoricalSet<MaxCategoricalSet, integral_t> categoricalSet;
       for (i = 0; i < n_selected; ++i) {
         categoricalSet.add(shuffle_temp[i]);
       }
@@ -478,6 +493,7 @@ private:
 };
 
 template <typename RNG, typename scalar_t = double,
+          typename integral_t = size_t,
           const size_t MaxCategoricalSet = 32>
 class [[maybe_unused]] CARTStrategy {
 public:
@@ -488,7 +504,7 @@ public:
           std::variant<std::vector<size_t>, std::vector<scalar_t>>> &data,
       std::vector<size_t> &indices,
       const std::vector<size_t> &available_features, size_t start, size_t end,
-      containers::Node<scalar_t, MaxCategoricalSet> &node,
+      containers::Node<scalar_t, integral_t, MaxCategoricalSet> &node,
       [[maybe_unused]] RNG &rng) const {
     auto bestFeature = static_cast<size_t>(-1);
     scalar_t bestThreshold = 0;
@@ -510,7 +526,7 @@ public:
 private:
   [[maybe_unused]] const size_t targetIndex;
   struct FeatureVisitor {
-    const std::vector<std::variant<std::vector<size_t>, std::vector<scalar_t>>>
+    const std::vector<std::variant<std::vector<integral_t>, std::vector<scalar_t>>>
         &data;
     const size_t feature, start, end;
     std::vector<size_t> &indices;
@@ -521,7 +537,7 @@ private:
     }
 
     std::tuple<double, scalar_t>
-    operator()(const std::vector<size_t> &) const noexcept {
+    operator()(const std::vector<integral_t> &) const noexcept {
       return findBestCategoricalSplit();
     }
 
@@ -553,8 +569,8 @@ private:
       auto [categoryMeans, categoryCounts] = computeCategoryMeans();
 
       const auto &categoricalData =
-          std::get<std::vector<size_t>>(data[feature]);
-      std::vector<std::pair<double, size_t>> indexedEncodedValues(end - start);
+          std::get<std::vector<integral_t>>(data[feature]);
+      std::vector<std::pair<double, integral_t>> indexedEncodedValues(end - start);
 
       for (size_t i = start; i < end; ++i) {
         indexedEncodedValues[i - start] = {
@@ -603,13 +619,13 @@ private:
     }
 
     std::tuple<containers::FixedSizeMap<size_t, scalar_t, MaxCategoricalSet>,
-               containers::FixedSizeMap<size_t, size_t, MaxCategoricalSet>>
+               containers::FixedSizeMap<size_t, integral_t, MaxCategoricalSet>>
     computeCategoryMeans() const noexcept {
       containers::FixedSizeMap<size_t, double, MaxCategoricalSet> categorySums;
-      containers::FixedSizeMap<size_t, size_t, MaxCategoricalSet> categoryCounts;
+      containers::FixedSizeMap<size_t, integral_t, MaxCategoricalSet> categoryCounts;
 
       const auto &categoricalData =
-          std::get<std::vector<size_t>>(data[feature]);
+          std::get<std::vector<integral_t>>(data[feature]);
 
       for (size_t i = start; i < end; ++i) {
         size_t category = categoricalData[indices[i]];
@@ -637,16 +653,17 @@ private:
 };
 }
 template <typename ResultF, typename RNG, typename SplitStrategy,
-          const size_t MaxCategoricalSet = 32, typename scalar_t = double>
+          const size_t MaxCategoricalSet = 32, typename scalar_t = double,
+          typename integral_t = size_t>
 class RandomTree {
-  using FeatureData = std::variant<std::vector<size_t>, std::vector<scalar_t>>;
+  using FeatureData = std::variant<std::vector<integral_t>, std::vector<scalar_t>>;
   // public:
   using ResultType = decltype(std::declval<ResultF>()(
       std::declval<std::vector<size_t> &>(), std::declval<size_t>(),
       std::declval<size_t>(),
       std::declval<const std::vector<FeatureData> &>()));
 
-  std::vector<containers::Node<scalar_t, MaxCategoricalSet>> nodes;
+  std::vector<containers::Node<scalar_t, integral_t, MaxCategoricalSet>> nodes;
   const size_t maxDepth, minNodesize;
   RNG &rng;
   ResultF &terminalNodeFunc;
@@ -762,8 +779,8 @@ public:
     }
   }
 
-  [[maybe_unused]] std::unordered_set<size_t> used_features() const {
-    std::unordered_set<size_t> features;
+  [[maybe_unused]] std::set<size_t> used_features() const {
+    std::set<size_t> features;
     for (const auto& node : nodes) {
         features.insert(node.featureIndex);
     }
@@ -793,7 +810,7 @@ public:
 
 private:
   void split(const std::vector<FeatureData> &data,
-             const containers::Node<scalar_t, MaxCategoricalSet> &node,
+             const containers::Node<scalar_t, integral_t, MaxCategoricalSet> &node,
              std::vector<size_t> &indices, size_t start, size_t &mid,
              size_t end) const noexcept {
 
@@ -813,10 +830,10 @@ private:
       }
     } else {
       const auto th =
-          std::get<containers::FixedCategoricalSet<MaxCategoricalSet>>(
+          std::get<containers::FixedCategoricalSet<MaxCategoricalSet, integral_t>>(
               threshold);
       const auto &categoricalData =
-          std::get<std::vector<size_t>>(data[feature]);
+          std::get<std::vector<integral_t>>(data[feature]);
       for (size_t i = start; i < end; ++i) {
         const auto &val = categoricalData[indices[i]];
         if (th.contains(val)) {
@@ -917,7 +934,7 @@ private:
     size_t mid = start;
     if (node.isCategorical()) {
       const auto &catSet = node.getCategoricalSet();
-      const auto &catData = std::get<std::vector<size_t>>(featureData);
+      const auto &catData = std::get<std::vector<integral_t>>(featureData);
       for (size_t i = start; i < end; ++i) {
         const auto &val = catData[indices[i]];
         if (catSet.contains(val)) {
@@ -979,7 +996,7 @@ private:
     size_t mid = start;
     if (node.isCategorical()) {
       const auto &catSet = node.getCategoricalSet();
-      const auto &catData = std::get<std::vector<size_t>>(featureData);
+      const auto &catData = std::get<std::vector<integral_t>>(featureData);
       for (size_t i = start; i < end; ++i) {
         const auto &val = catData[indices[i]];
         if (catSet.contains(val)) {
@@ -1013,10 +1030,12 @@ private:
 };
 
 template <typename ResultF, typename RNG, typename SplitStrategy,
-          size_t MaxCategoricalSet = 32, typename scalar_t = double>
+          size_t MaxCategoricalSet = 32, typename scalar_t = double,
+          typename integral_t = size_t>
 class [[maybe_unused]] RandomForest {
-  using FeatureData = std::variant<std::vector<size_t>, std::vector<scalar_t>>;
-  using TreeType = RandomTree<ResultF, RNG, SplitStrategy, MaxCategoricalSet, scalar_t>;
+  using FeatureData = std::variant<std::vector<integral_t>, std::vector<scalar_t>>;
+  using TreeType = RandomTree<ResultF, RNG, SplitStrategy, MaxCategoricalSet,
+                              scalar_t, integral_t>;
   using ResultType = decltype(std::declval<ResultF>()(
       std::declval<std::vector<size_t> &>(), std::declval<size_t>(),
       std::declval<size_t>(),
@@ -1034,7 +1053,7 @@ public:
            const std::vector<size_t> &nosplit_features,
            const bool resample = true,
            const size_t sample_size = 0) {
-    trees.reserve(n_tree);
+    //trees= std::vector<TreeType>(n_tree);
     size_t bootstrap_size =
         sample_size > 0
             ? sample_size
@@ -1059,10 +1078,10 @@ public:
     for (size_t i = 0; i < n_tree; ++i) {
 #ifdef NO_MULTITHREAD
       [this, &data, &nosplit_features,
-       resample_, &seeds, bootstrap_size, &i]() {
+       resample_, &seeds, bootstrap_size, i]() {
 #else
-      pool.enqueue([this, &data, &nosplit_features, //&mtx,
-                    resample_, &seeds, bootstrap_size, &i] {
+      pool.enqueue([this, &data, &nosplit_features,
+                    resample_, &seeds, bootstrap_size, i] {
 #endif
         std::vector<size_t> indices(std::visit(
             [](auto &&arg) -> size_t { return arg.size(); }, data[0]));
@@ -1076,7 +1095,7 @@ public:
         } else {
           tree.fit(data, indices, nosplit_features);
         }
-        trees.emplace_back(tree);
+        trees.push_back(tree);
       }
 #ifdef NO_MULTITHREAD
       ();
@@ -1094,13 +1113,13 @@ public:
 #endif
     for (size_t i = 0; i < trees.size(); ++i) {
 #ifdef NO_MULTITHREAD
-      results[i](tree.predict(samples));
+      results[i](trees[i].predict(samples));
 #else
-      pool.enqueue([this, &samples, &i] {
-        results[i](trees[i].predict(samples));
+      pool.enqueue([this, &results, &samples, &i] {
+        results[i] = trees[i].predict(samples);
       });
-    }
 #endif
+    }
     return results;
   }
   template<typename Accumulator>
@@ -1143,40 +1162,32 @@ public:
                           &accumulator, &nosplit_features,
                           resample_, &seeds, bootstrap_size, i] {
 #endif
-        std::vector<size_t> indices(
-            std::visit([](auto&& arg) -> size_t {
-              return arg.size();
-            }, train_data[0]));
+        std::vector<size_t> indices(std::visit(
+            [](auto &&arg) -> size_t { return arg.size(); }, train_data[0]));
         std::iota(indices.begin(), indices.end(), 0);
 #ifdef NO_MULTITHREAD
-        auto& rng_ = rng;
+        auto &rng_ = rng;
 #else
         RNG rng_(seeds[i]);
 #endif
         TreeType tree(maxDepth, minNodesize, rng_, terminalNodeFunc, strategy);
         if (resample_) {
-          tree.fit(train_data, bootstrap_sample(indices, bootstrap_size), nosplit_features);
+          tree.fit(train_data, bootstrap_sample(indices, bootstrap_size),
+                   nosplit_features);
         } else {
           tree.fit(train_data, indices, nosplit_features);
         }
-        if(tree.is_uninformative()) {
+        if (tree.is_uninformative()) {
           // make it clear that this tree does not count
           return;
         }
-        std::vector<size_t> pred_indices(
-        std::visit([](auto&& arg) -> size_t {
-          return arg.size();
-        }, predict_data[0]));
+        std::vector<size_t> pred_indices(std::visit(
+            [](auto &&arg) -> size_t { return arg.size(); }, predict_data[0]));
         std::iota(pred_indices.begin(), pred_indices.end(), 0);
-        // use compile-time check to determine which predict to call
-        if constexpr (utils::is_invocable_with<Accumulator,
-                                                std::vector<utils::value_type_t<ResultType>>>::value) {
-          auto prediction_result = tree.template predict<true>(predict_data, pred_indices);
-          accumulator(prediction_result);
-        } else {
-          auto prediction_result = tree.template predict<false>(predict_data, pred_indices);
-          accumulator(prediction_result);
-        }
+        auto prediction_result = tree.template predict<utils::is_invocable_with<
+            Accumulator, std::vector<utils::value_type_t<ResultType>>>::value>(
+            predict_data, pred_indices);
+        accumulator(prediction_result);
       }
 #ifdef NO_MULTITHREAD
       ();
@@ -1195,8 +1206,6 @@ public:
     );
   }
   // Feature importance method
-  // TODO(JSzitas): Currently most definitely broken, fix concurrency before
-  // you think about using this, see how its done above
   template<typename Accumulator, typename Importance>
   [[maybe_unused]] auto feature_importance(
       const std::vector<FeatureData> &train_data,
@@ -1211,7 +1220,6 @@ public:
     if(resample != resample_) {
       std::cout << "You specified 'resample = true', " <<
           "but provided 'sample_size = 0'. Quitting, respecify." << std::endl;
-      return;
     }
     std::vector<Accumulator> accumulators(train_data.size() + 1 -
                                           nosplit_features.size());
@@ -1225,10 +1233,10 @@ public:
     for (size_t i = 0; i < n_tree; ++i) {
 #ifdef NO_MULTITHREAD
       [this, &train_data, &predict_data,
-       &accumulator, &nosplit_features,
+       &accumulators, &nosplit_features,
        resample_, bootstrap_size]() {
 #else
-      pool.enqueue([this, &train_data, &predict_data,
+      pool.enqueue([this, &train_data, &predict_data, &accumulators,
                     &nosplit_features, resample_, &seeds, bootstrap_size, i] {
 #endif
         std::vector<size_t> indices(
@@ -1256,7 +1264,9 @@ public:
               return arg.size();
             }, predict_data[0]));
         std::iota(pred_indices.begin(), pred_indices.end(), 0);
-        using res_type = decltype(tree.template predict<true>(
+        using res_type = decltype(tree.template predict<utils::is_invocable_with<
+                                      Accumulator,
+                                      std::vector<utils::value_type_t<ResultType>>>::value>(
           predict_data, pred_indices));
         auto used_features = tree.used_features();
         // we only have to iterate over the above; thus we are
@@ -1265,30 +1275,21 @@ public:
         // compute baseline - update first accumulator
         if constexpr (utils::is_invocable_with<
                           Accumulator,
-                          std::vector<utils::value_type_t<
-                              typename TreeType::ResultType>>>::value) {
-          updates[0] = tree.template predict<true>(
-              predict_data, pred_indices);
+                          std::vector<utils::value_type_t<ResultType>>>::value) {
+          updates[0] = tree.template predict<true>(predict_data, pred_indices);
         } else {
-          updates[0] = tree.template predict<false>(
-              predict_data, pred_indices);
+          updates[0] = tree.template predict<false>(predict_data, pred_indices);
         }
-        size_t feature_i = 0;
+        size_t feature_i = 1;
         for(const auto feature : used_features) {
-          // Use compile-time check to determine which predict to call
-          if constexpr (utils::is_invocable_with<
-                            Accumulator,
-                            std::vector<utils::value_type_t<
-                                typename TreeType::ResultType>>>::value) {
-            updates[feature_i++] = tree.template predictWithoutFeature<true>(
+            updates[feature_i++] = tree.template predictWithoutFeature<utils::is_invocable_with<
+                                   Accumulator,
+                                   std::vector<utils::value_type_t<ResultType>>>::value>(
                 predict_data, pred_indices, feature);
-          } else {
-            updates[feature_i++] = tree.template predictWithoutFeature<false>(
-                predict_data, pred_indices, feature);
-          }
         }
-        for(feature_i = 1; feature_i < used_features.size() + 1; feature_i++) {
-          accumulators[used_features[feature_i - 1]](updates[feature_i]);
+        accumulators[0](updates[0]);
+        for(feature_i = 1; feature_i < updates.size(); feature_i++) {
+          accumulators[feature_i](updates[feature_i]);
         }
       }
 #ifdef NO_MULTITHREAD
