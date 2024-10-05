@@ -4,3 +4,6 @@
 .Ruserdata
 cmake-build-debug/
 .idea/*
+*.csv
+test_data/*.parquet
+perf.data

@@ -16,19 +16,6 @@
 #include <condition_variable>
 #include <functional>
 #include <queue>
-/*
-#if defined(__clang__)
-#define TO_STRING_LITERAL(x) #x
-#define CLANG_DIAGNOSTIC_HELPER(x) _Pragma(TO_STRING_LITERAL(clang diagnostic ignored x))
-#define IGNORE_CLANG_DIAGNOSTIC(DIAGNOSTIC, CODE) \
-    _Pragma("clang diagnostic push")              \
-    CLANG_DIAGNOSTIC_HELPER(DIAGNOSTIC)           \
-    CODE                                          \
-    _Pragma("clang diagnostic pop")
-#else
-#define IGNORE_CLANG_DIAGNOSTIC(DIAGNOSTIC, CODE) \
-    CODE
-#endif*/
 
 namespace treeson {
 namespace utils {
@@ -118,7 +105,18 @@ template <typename T>
   }
   std::cout << "]" << std::endl;
 }
-
+// Function to print a set of integers
+template<typename T>
+[[maybe_unused]] void print_set(const std::set<T>& mySet) {
+  for (const auto elem : mySet) {
+    std::cout << elem << " ";
+  }
+  std::cout << std::endl;
+}
+template<typename T> size_t size(T&x) {
+    return std::visit([](auto &&arg) -> size_t { return arg.size(); },
+             x);
+}
 template<typename scalar_t> struct Welford{
   scalar_t mean_ = 0.0, sd_ = 1.0;
   size_t i = 1;
@@ -192,6 +190,35 @@ rmse(const std::vector<scalar_t>& x,
   }
   res /= static_cast<scalar_t>(n);
   return std::sqrt(res);
+}
+template<typename RNG>
+std::vector<size_t> bootstrap_sample(const std::vector<size_t>& indices,
+                                     const size_t sample_size,
+                                     RNG &rng) {
+  std::uniform_int_distribution<size_t> dist(0, indices.size() - 1);
+  std::vector<size_t> bootstrap_indices = indices;
+  std::shuffle(bootstrap_indices.begin(), bootstrap_indices.end(), rng);
+  bootstrap_indices.resize(sample_size);
+  return bootstrap_indices;
+}
+template<typename RNG>
+auto bootstrap_two_samples(const std::vector<size_t>& indices,
+                           const size_t sample_size,
+                           RNG &rng) {
+  std::uniform_int_distribution<size_t> dist(0, indices.size() - 1);
+  std::vector<size_t> bootstrap_indices = indices;
+  std::shuffle(bootstrap_indices.begin(), bootstrap_indices.end(), rng);
+  auto second_sample = std::vector<size_t>(sample_size);
+  for(size_t i = sample_size; i< 2*sample_size; i++) {
+    second_sample[i-sample_size] = bootstrap_indices[i];
+  }
+  bootstrap_indices.resize(sample_size);
+  return std::pair(bootstrap_indices, second_sample);
+}
+std::vector<size_t> make_index_range(const size_t size) {
+  std::vector<size_t> indices(size);
+  std::iota(indices.begin(), indices.end(), 0);
+  return indices;
 }
 template<typename T> struct value_type_extractor;
 template<template<typename...> class Container, typename Element>
@@ -272,6 +299,43 @@ public:
     cv_.notify_one();
   }
 };
+template<typename SharedResource>
+struct [[maybe_unused]] SharedResourceWrapper{
+  mutable std::mutex m_mutex;
+  // make sure resource and mutex are actually initialized
+  SharedResource resource;
+  // Default constructor
+  SharedResourceWrapper() = default;
+  explicit SharedResourceWrapper(SharedResource resource) : resource(std::move(resource)) {}
+  SharedResourceWrapper(const SharedResourceWrapper&) = delete;
+  SharedResourceWrapper& operator=(const SharedResourceWrapper&) = delete;
+  SharedResourceWrapper(SharedResourceWrapper&&) noexcept = default;
+  SharedResourceWrapper& operator=(SharedResourceWrapper&&) noexcept = default;
+  template<typename... Args>
+  auto operator()(Args&&... args) -> decltype(resource(std::forward<Args>(args)...)) {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    return resource(std::forward<Args>(args)...);
+  }
+  // Proxy that locks mutex and forwards calls to the resource
+  class Proxy {
+    std::lock_guard<std::mutex> lock;
+    SharedResource& resource;
+
+  public:
+    Proxy(std::mutex& mtx, SharedResource& res)
+        : lock(mtx), resource(res) {}
+
+    // Forward calls to the resource using the arrow operator
+    SharedResource* operator->() {
+      return &resource;
+    }
+  };
+
+  // Operator-> to create and return the proxy
+  Proxy operator->() {
+    return Proxy(m_mutex, resource);
+  }
+};
 }
 namespace containers {
 template <const size_t MaxCategoricalSet,
@@ -299,7 +363,7 @@ public:
   size_t featureIndex;
   std::variant<scalar_t, FixedCategoricalSet<MaxCategoricalSet, integral_t>> threshold;
   size_t terminal_index = std::numeric_limits<size_t>::max();
-  std::array<size_t, 3> parent_child_index = {0, 0, 0}; // Parent, Left, Right
+  std::array<size_t, 2> child_index = {0, 0}; // Left, Right
   bool missing_goes_right;
   Node()
       : featureIndex(std::numeric_limits<size_t>::max()), terminal_index(0),
@@ -652,6 +716,33 @@ private:
   };
 };
 }
+namespace reducers{
+template<typename scalar_t> struct defaultImportanceReducer {
+  scalar_t operator()(const std::vector<std::pair<scalar_t, size_t>>& x) {
+    scalar_t sum = 0.;
+    size_t size = 0;
+    for(const auto& val : x) {
+      sum += val.first * static_cast<scalar_t>(val.second);
+      size += val.second;
+    }
+    return sum/static_cast<scalar_t>(size);
+  }
+  std::vector<scalar_t> operator()(const std::vector<std::pair<std::vector<scalar_t>, size_t>>& x) {
+    std::vector<scalar_t> sums(x[0].first.size(), 0.);
+    size_t sum_index = 0;
+    for(auto& sum : sums) {
+      size_t size = 0;
+      for(const auto& val : x) {
+        sum += val.first[sum_index] * static_cast<scalar_t>(val.second);
+        size += val.second;
+      }
+      sum /= static_cast<scalar_t>(size);
+      sum_index++;
+    }
+    return sums;
+  }
+};
+}
 template <typename ResultF, typename RNG, typename SplitStrategy,
           const size_t MaxCategoricalSet = 32, typename scalar_t = double,
           typename integral_t = size_t>
@@ -730,9 +821,8 @@ public:
   template <const bool FlattenResults = false>
   [[nodiscard]] auto predict(const std::vector<FeatureData> &samples)
       const noexcept {
-    std::vector<size_t> indices(std::visit(
+    std::vector<size_t> indices = treeson::utils::make_index_range(std::visit(
         [](auto &&arg) -> size_t { return arg.size(); }, samples[0]));
-    std::iota(indices.begin(), indices.end(), 0);
     if constexpr (FlattenResults) {
       std::vector<utils::value_type_t<ResultType>> flat_result;
       predictSamples<true>(0, samples, indices, 0, indices.size(), flat_result);
@@ -744,41 +834,6 @@ public:
       return result;
     }
   }
-  template <const bool FlattenResults = false>
-  [[maybe_unused]] [[nodiscard]] auto predictWithoutFeature(
-      const std::vector<FeatureData> &samples,
-      std::vector<size_t> &indices,
-      const size_t excludedFeature) const noexcept {
-    if constexpr (FlattenResults) {
-      std::vector<utils::value_type_t<ResultType>> flat_result;
-      predictSamplesWithoutFeature<true>(0, samples, indices, 0, indices.size(), flat_result, excludedFeature);
-      return flat_result;
-    } else {
-      containers::TreePredictionResult<ResultType> result;
-      result.indices = indices;
-      predictSamplesWithoutFeature<false>(0, samples, indices, 0, indices.size(), result, excludedFeature);
-      return result;
-    }
-  }
-  template <const bool FlattenResults = false>
-  [[maybe_unused]] [[nodiscard]] auto predictWithoutFeature(
-      const std::vector<FeatureData> &samples,
-      const size_t excludedFeature) const noexcept {
-    std::vector<size_t> indices(std::visit(
-        [](auto &&arg) -> size_t { return arg.size(); }, samples[0]));
-    std::iota(indices.begin(), indices.end(), 0);
-    if constexpr (FlattenResults) {
-      std::vector<utils::value_type_t<ResultType>> flat_result;
-      predictSamplesWithoutFeature<true>(0, samples, indices, 0, indices.size(), flat_result, excludedFeature);
-      return flat_result;
-    } else {
-      containers::TreePredictionResult<ResultType> result;
-      result.indices = indices;
-      predictSamplesWithoutFeature<false>(0, samples, indices, 0, indices.size(), result, excludedFeature);
-      return result;
-    }
-  }
-
   [[maybe_unused]] std::set<size_t> used_features() const {
     std::set<size_t> features;
     for (const auto& node : nodes) {
@@ -786,7 +841,6 @@ public:
     }
     return features;
   }
-
   [[maybe_unused]] void print_tree_info() const noexcept {
     std::cout << "Number of terminal nodes: " << terminal_values.size()
               << std::endl;
@@ -807,42 +861,35 @@ public:
     // consists of only root
     return nodes.size() == 1;
   }
+  template<typename Metric, typename Reducer = treeson::reducers::defaultImportanceReducer<scalar_t>>
+  [[maybe_unused]] auto eval_oob(
+      const std::vector<FeatureData> &oob_data,
+      std::vector<size_t> &indices) {
+    using MetricResultType = decltype(std::declval<Metric>()(
+      std::declval<ResultType&>(), std::declval<const std::vector<FeatureData> &>(),
+      std::declval<const std::vector<size_t>&>(),
+      std::declval<const size_t>(), std::declval<const size_t>()));
+    std::vector<std::pair<MetricResultType, size_t>> results;
+    eval_oob_impl<Metric,false>(
+        0, oob_data, indices, 0, indices.size(), results, 0);
+    return Reducer()(results);
+  }
+  template<typename Metric, typename Reducer = treeson::reducers::defaultImportanceReducer<scalar_t>>
+  [[maybe_unused]] auto eval_oob(
+      const std::vector<FeatureData> &oob_data,
+      std::vector<size_t> &indices,
+      const size_t excluded_feature) {
+    using MetricResultType = decltype(std::declval<Metric>()(
+      std::declval<ResultType&>(), std::declval<const std::vector<FeatureData> &>(),
+      std::declval<const std::vector<size_t>&>(),
+      std::declval<const size_t>(), std::declval<const size_t>()));
+    std::vector<std::pair<MetricResultType, size_t>> results;
+    eval_oob_impl<Metric,true>(
+        0, oob_data, indices, 0, indices.size(), results, excluded_feature);
+    return Reducer()(results);
+  }
 
 private:
-  void split(const std::vector<FeatureData> &data,
-             const containers::Node<scalar_t, integral_t, MaxCategoricalSet> &node,
-             std::vector<size_t> &indices, size_t start, size_t &mid,
-             size_t end) const noexcept {
-
-    const auto feature = node.featureIndex;
-    const auto &threshold = node.threshold;
-    const auto missing_dir = node.missing_goes_right;
-
-    if (std::holds_alternative<scalar_t>(threshold)) {
-      const scalar_t th = std::get<scalar_t>(threshold);
-      const auto &numericData = std::get<std::vector<scalar_t>>(data[feature]);
-      for (size_t i = start; i < end; ++i) {
-        const auto &val = numericData[indices[i]];
-        if ((val <= th) || (std::isnan(val) && missing_dir)) {
-          std::swap(indices[i], indices[mid]);
-          ++mid;
-        }
-      }
-    } else {
-      const auto th =
-          std::get<containers::FixedCategoricalSet<MaxCategoricalSet, integral_t>>(
-              threshold);
-      const auto &categoricalData =
-          std::get<std::vector<integral_t>>(data[feature]);
-      for (size_t i = start; i < end; ++i) {
-        const auto &val = categoricalData[indices[i]];
-        if (th.contains(val)) {
-          std::swap(indices[i], indices[mid]);
-          ++mid;
-        }
-      }
-    }
-  }
   void buildTree(const std::vector<FeatureData> &data,
                  std::vector<size_t> &indices,
                  const std::vector<size_t> &available_features,
@@ -850,17 +897,14 @@ private:
                  size_t depth = 0) noexcept {
     nodes.emplace_back();
     size_t nodeIndex = nodes.size() - 1;
-    if (nodes[parentIndex].parent_child_index[1] == 0) {
-      nodes[parentIndex].parent_child_index[1] = nodeIndex; // Left child
+    if (nodes[parentIndex].child_index[0] == 0) {
+      nodes[parentIndex].child_index[0] = nodeIndex; // Left child
     } else {
-      nodes[parentIndex].parent_child_index[2] = nodeIndex; // Right child
+      nodes[parentIndex].child_index[1] = nodeIndex; // Right child
     }
     split_strategy.select_split(data, indices, available_features, start, end,
                                 nodes[nodeIndex], rng);
-    size_t mid = start;
-    //std::cout << "Left going: " << mid - start << " right going: " << end - mid
-    //          << std::endl;
-    split(data, nodes[nodeIndex], indices, start, mid, end);
+    size_t mid = reorder_indices(data, nodes[nodeIndex], start, end, indices);
     // if a child node would be too small
     if (((mid - start) <= minNodesize) || ((end - mid) <= minNodesize) ||
         depth >= maxDepth) {
@@ -868,20 +912,58 @@ private:
       terminal_values.push_back(terminalNodeFunc(indices, start, end, data));
       nodes[nodeIndex].assign_terminal(terminal_values.size() - 1);
     } else {
-      nodes[nodeIndex].parent_child_index[0] = parentIndex;
       buildTree(data, indices, available_features, nodeIndex, start, mid,
                 depth + 1);
       buildTree(data, indices, available_features, nodeIndex, mid, end,
                 depth + 1);
     }
   }
+  template<typename Metric, const bool exclude_feature = false> [[nodiscard]]
+  auto eval_oob_impl(
+      size_t nodeIndex, const std::vector<FeatureData> &oob_data,
+      std::vector<size_t> &indices, size_t start, size_t end,
+      std::vector<std::pair<decltype(std::declval<Metric>()(
+                                    std::declval<ResultType&>(), std::declval<const std::vector<FeatureData> &>(),
+                                    std::declval<const std::vector<size_t>&>(),
+                                    std::declval<const size_t>(), std::declval<const size_t>())),size_t>>& results,
+      const size_t excluded_feature) const noexcept {
+        const auto &node = nodes[nodeIndex];
+        if (node.child_index[0] == 0 && node.child_index[1] == 0) {
+          const auto& vals = terminal_values[node.terminal_index];
+          results.push_back(std::pair(Metric()(vals, oob_data, indices, start, end), end-start));
+          return;
+        }
+        if constexpr(exclude_feature) {
+          if (nodes[nodeIndex].featureIndex == excluded_feature) {
+            // consider that this probably returns only per one of these branches
+            eval_oob_impl<Metric, true>(
+                node.child_index[0], oob_data,
+                indices, start, end, results, excluded_feature);
+            eval_oob_impl<Metric, true>(
+                node.child_index[1], oob_data,
+                indices, start, end, results, excluded_feature);
+          }
+        }
+        auto mid = reorder_indices(
+            oob_data, nodes[nodeIndex], start, end, indices);
+        if (mid > start) {
+          eval_oob_impl<Metric, false>(
+              node.child_index[0], oob_data,
+              indices, start, mid, results, excluded_feature);
+        }
+        if (mid < end) {
+          eval_oob_impl<Metric, false>(
+              node.child_index[1], oob_data,
+              indices, mid, end, results, excluded_feature);
+        }
+    }
   void print_node(size_t node_index, size_t depth) const noexcept {
     const auto &node = nodes[node_index];
     if (depth >= maxDepth) {
       return;
     }
     std::string indent(depth * 4, '-');
-    if (node.parent_child_index[0] == 0 && node.parent_child_index[1] == 0) {
+    if (node.child_index[0] == 0) { //&& node.child_index[1] == 0) {
       std::cout << indent << "Terminal Node [Value: ";
       utils::print_element(std::cout, terminal_values[node.terminal_index]);
       std::cout << ", index: " << node.terminal_index << "]" << std::endl;
@@ -904,19 +986,16 @@ private:
                 << "] | MIA: " << node.getMIADirection();
     }
     std::cout << std::endl;
-    print_node(node.parent_child_index[1], depth + 1);
-    print_node(node.parent_child_index[2], depth + 1);
+    print_node(node.child_index[0], depth + 1);
+    print_node(node.child_index[1], depth + 1);
   }
   template <const bool FlattenResults, typename ResultContainer>
   void predictSamples(size_t nodeIndex, const std::vector<FeatureData> &samples,
-                      std::vector<size_t> &indices, size_t start, size_t end,
+                      std::vector<size_t> &indices, const size_t start, const size_t end,
                       ResultContainer &predictionResult) const noexcept {
     const auto &node = nodes[nodeIndex];
-    if (node.parent_child_index[1] == 0 && node.parent_child_index[2] == 0) {
+    if (node.child_index[0] == 0) { //&& node.child_index[1] == 0) {
       // leaf node
-      // TODO(JSzitas): The issue is that I do not necessarily know
-      // what the indices are for the prediction; thus I cannot correctly associate
-      // from prediction to result
       if constexpr (FlattenResults) {
         const auto &result_container = terminal_values[node.terminal_index];
         predictionResult.insert(predictionResult.end(),
@@ -928,70 +1007,22 @@ private:
       }
       return;
     }
-
-    auto featureData = samples[node.featureIndex];
-    const auto miss_dir = node.getMIADirection();
-    size_t mid = start;
-    if (node.isCategorical()) {
-      const auto &catSet = node.getCategoricalSet();
-      const auto &catData = std::get<std::vector<integral_t>>(featureData);
-      for (size_t i = start; i < end; ++i) {
-        const auto &val = catData[indices[i]];
-        if (catSet.contains(val)) {
-          std::swap(indices[i], indices[mid]);
-          ++mid;
-        }
-      }
-    } else {
-      const auto &numThreshold = node.getNumericThreshold();
-      const auto &numData = std::get<std::vector<scalar_t>>(featureData);
-      for (size_t i = start; i < end; ++i) {
-        const auto &val = numData[indices[i]];
-        if ((val <= numThreshold) || (std::isnan(val) && miss_dir)) {
-          std::swap(indices[i], indices[mid]);
-          ++mid;
-        }
-      }
-    }
+    auto mid = reorder_indices(samples, nodes[nodeIndex], start, end, indices);
     if (mid > start) {
       predictSamples<FlattenResults>(
-          node.parent_child_index[1], samples,
+          node.child_index[0], samples,
           indices, start, mid, predictionResult);
     }
     if (mid < end) {
       predictSamples<FlattenResults>(
-          node.parent_child_index[2], samples,
+          node.child_index[1], samples,
           indices, mid, end, predictionResult);
     }
   }
-  template <const bool FlattenResults, typename ResultContainer>
-  void predictSamplesWithoutFeature(
-      const size_t nodeIndex, const std::vector<FeatureData> &samples,
-      std::vector<size_t> &indices, const size_t start, const size_t end,
-      ResultContainer &predictionResult, const size_t excludedFeature
-      ) const noexcept {
-    const auto &node = nodes[nodeIndex];
-    if (node.parent_child_index[1] == 0 && node.parent_child_index[2] == 0) {
-      // leaf node
-      if constexpr (FlattenResults) {
-        const auto &result_container = terminal_values[node.terminal_index];
-        predictionResult.insert(
-            predictionResult.end(), result_container.begin(), result_container.end());
-      } else {
-        predictionResult.results.emplace_back(
-            std::make_pair(start, end), terminal_values[node.terminal_index]);
-      }
-      return;
-    }
-
-    if (node.featureIndex == excludedFeature) {
-      // Ignore the current split if feature matches the excludedFeature
-      predictSamplesWithoutFeature<FlattenResults>(node.parent_child_index[1], samples, indices, start, end, predictionResult, excludedFeature);
-      predictSamplesWithoutFeature<FlattenResults>(node.parent_child_index[2], samples, indices, start, end, predictionResult, excludedFeature);
-      return;
-    }
-
-    auto featureData = samples[node.featureIndex];
+  size_t reorder_indices(const std::vector<FeatureData>& data,
+                         const treeson::containers::Node<scalar_t, integral_t, MaxCategoricalSet>& node,
+                         const size_t start, const size_t end, std::vector<size_t>& indices) const {
+    auto featureData = data[node.featureIndex];
     const auto miss_dir = node.getMIADirection();
     size_t mid = start;
     if (node.isCategorical()) {
@@ -1015,22 +1046,12 @@ private:
         }
       }
     }
-
-    if (mid > start) {
-      predictSamplesWithoutFeature<FlattenResults>(
-          node.parent_child_index[1], samples, indices,
-          start, mid, predictionResult, excludedFeature);
-    }
-    if (mid < end) {
-      predictSamplesWithoutFeature<FlattenResults>(
-          node.parent_child_index[2], samples, indices,
-          mid, end, predictionResult, excludedFeature);
-    }
+    return mid;
   }
 };
 
 template <typename ResultF, typename RNG, typename SplitStrategy,
-          size_t MaxCategoricalSet = 32, typename scalar_t = double,
+          const size_t MaxCategoricalSet = 32, typename scalar_t = double,
           typename integral_t = size_t>
 class [[maybe_unused]] RandomForest {
   using FeatureData = std::variant<std::vector<integral_t>, std::vector<scalar_t>>;
@@ -1053,12 +1074,10 @@ public:
            const std::vector<size_t> &nosplit_features,
            const bool resample = true,
            const size_t sample_size = 0) {
-    //trees= std::vector<TreeType>(n_tree);
     size_t bootstrap_size =
         sample_size > 0
             ? sample_size
-            : std::visit([](auto &&arg) -> size_t { return arg.size(); },
-                         data[0]);
+            : utils::size(data[0]);
     const bool resample_ = resample && sample_size > 0;
     if (resample != resample_) {
       std::cout << "You specified 'resample = true', "
@@ -1066,43 +1085,62 @@ public:
                 << std::endl;
       return;
     }
-    // TODO(JSzitas): revisit and validate
-    // do the lazy thing following L'Ecuyer; I am not totally sure it is applicable see 'Random Numbers for Parallel Computers: Requirements and Methods, With Emphasis on GPUs' Pierre L’Ecuyer, David Munger, Boris Oreshkin, Richard Simard, p.15 'A single RNG with a “random” seed for each stream.' link: https://www.iro.umontreal.ca/~lecuyer/myftp/papers/parallel-rng-imacs.pdf
-    std::vector<size_t> seeds(n_tree);
-    for (auto &seed : seeds) {
-      seed = rng();
+#ifndef NO_MULTITHREAD
+    threading::SharedResourceWrapper<std::vector<TreeType>> trees_;
+#endif
+    // N.B.: Outer scope forces thread pool to finish before we do anything
+    {
+#ifndef NO_MULTITHREAD
+      threading::ThreadPool pool;
+      // required for thread safety
+#endif
+      for (size_t i = 0; i < n_tree; ++i) {
+#ifdef NO_MULTITHREAD
+        [this, &data, &nosplit_features, resample_, bootstrap_size,
+         i]() {
+#else
+        const size_t seed = rng();
+        pool.enqueue([this, &data, &trees_, &nosplit_features, resample_, seed,
+                      bootstrap_size] {
+#endif
+          std::vector<size_t> indices =
+              utils::make_index_range(utils::size(data[0]));
+          // custom random number generator for this tree
+#ifndef NO_MULTITHREAD
+          RNG rng_(seed);
+#else
+          auto& rng_ = rng;
+#endif
+          TreeType tree(maxDepth, minNodesize, rng_, terminalNodeFunc,
+                        strategy);
+          if (resample_) {
+            tree.fit(
+                data,
+                treeson::utils::bootstrap_sample(indices, bootstrap_size, rng_),
+                nosplit_features);
+          } else {
+            tree.fit(data, indices, nosplit_features);
+          }
+          /* N.B.: for thread safety this is invoked via a proxy; be not afraid,
+             but do not try to modify the implementation unless you know
+             what is going on */
+#ifndef NO_MULTITHREAD
+          trees_->push_back(tree);
+#else
+          trees.push_back(tree);
+#endif
+        }
+#ifdef NO_MULTITHREAD
+        ();
+#else
+        );
+#endif
+      }
     }
 #ifndef NO_MULTITHREAD
-    threading::ThreadPool pool;
+    // move to actual trees
+    trees = std::move(trees_.resource);
 #endif
-    for (size_t i = 0; i < n_tree; ++i) {
-#ifdef NO_MULTITHREAD
-      [this, &data, &nosplit_features,
-       resample_, &seeds, bootstrap_size, i]() {
-#else
-      pool.enqueue([this, &data, &nosplit_features,
-                    resample_, &seeds, bootstrap_size, i] {
-#endif
-        std::vector<size_t> indices(std::visit(
-            [](auto &&arg) -> size_t { return arg.size(); }, data[0]));
-        std::iota(indices.begin(), indices.end(), 0);
-        // custom random number generator for this tree
-        RNG rng_(seeds[i]);
-        TreeType tree(maxDepth, minNodesize, rng_, terminalNodeFunc, strategy);
-        if (resample_) {
-          tree.fit(data, bootstrap_sample(indices, bootstrap_size),
-                   nosplit_features);
-        } else {
-          tree.fit(data, indices, nosplit_features);
-        }
-        trees.push_back(tree);
-      }
-#ifdef NO_MULTITHREAD
-      ();
-#else
-      );
-#endif
-    }
   }
   [[nodiscard]] std::vector<containers::TreePredictionResult<ResultType>> predict(
       const std::vector<FeatureData> &samples) const noexcept {
@@ -1113,7 +1151,7 @@ public:
 #endif
     for (size_t i = 0; i < trees.size(); ++i) {
 #ifdef NO_MULTITHREAD
-      results[i](trees[i].predict(samples));
+      results[i] = trees[i].predict(samples);
 #else
       pool.enqueue([this, &results, &samples, &i] {
         results[i] = trees[i].predict(samples);
@@ -1130,7 +1168,7 @@ public:
       const size_t n_tree,
       const std::vector<size_t> &nosplit_features,
       const bool resample = true,
-      const size_t sample_size = 0) {
+      const size_t sample_size = 0) const noexcept {
     size_t bootstrap_size = sample_size > 0 ? sample_size :
       std::visit([](auto&& arg) -> size_t { return arg.size(); }, train_data[0]);
     const bool resample_ = resample && sample_size > 0;
@@ -1139,62 +1177,70 @@ public:
           "but provided 'sample_size = 0'. Quitting, respecify." << std::endl;
       return;
     }
-    // TODO(JSzitas): revisit and validate
-    // do the lazy thing following L'Ecuyer; I am not totally sure it is applicable
+    // do the lazy thing following L'Ecuyer
     // see 'Random Numbers for Parallel Computers: Requirements and Methods, With Emphasis on GPUs'
     // Pierre L’Ecuyer, David Munger, Boris Oreshkin, Richard Simard, p.15
     // 'A single RNG with a “random” seed for each stream.'
     // link: https://www.iro.umontreal.ca/~lecuyer/myftp/papers/parallel-rng-imacs.pdf
 #ifndef NO_MULTITHREAD
-    std::vector<size_t> seeds(n_tree);
-    for(auto& seed : seeds) {
-      seed = rng();
-    }
-    threading::ThreadPool pool;
-#endif
-    for (size_t i = 0; i < n_tree; ++i) {
-#ifdef NO_MULTITHREAD
-      [this, &train_data, &predict_data,
-       &accumulator, &nosplit_features,
-       resample_, bootstrap_size]() {
+    // ensure no data races
+    threading::SharedResourceWrapper<Accumulator> accumulator_(accumulator);
 #else
-      pool.enqueue([this, &train_data, &predict_data,
-                          &accumulator, &nosplit_features,
-                          resample_, &seeds, bootstrap_size, i] {
+    auto& accumulator_ = accumulator;
 #endif
-        std::vector<size_t> indices(std::visit(
-            [](auto &&arg) -> size_t { return arg.size(); }, train_data[0]));
-        std::iota(indices.begin(), indices.end(), 0);
+    {
+#ifndef NO_MULTITHREAD
+      threading::ThreadPool pool;
+#endif
+      for (size_t i = 0; i < n_tree; ++i) {
 #ifdef NO_MULTITHREAD
-        auto &rng_ = rng;
+        [this, &train_data, &predict_data, &accumulator, &nosplit_features,
+         resample_, bootstrap_size]() {
 #else
-        RNG rng_(seeds[i]);
+        const size_t seed = rng();
+        pool.enqueue([this, &train_data, &predict_data, &accumulator_,
+                      &nosplit_features, resample_, seed, bootstrap_size] {
 #endif
-        TreeType tree(maxDepth, minNodesize, rng_, terminalNodeFunc, strategy);
-        if (resample_) {
-          tree.fit(train_data, bootstrap_sample(indices, bootstrap_size),
-                   nosplit_features);
-        } else {
-          tree.fit(train_data, indices, nosplit_features);
+          std::vector<size_t> indices(std::visit(
+              [](auto &&arg) -> size_t { return arg.size(); }, train_data[0]));
+          std::iota(indices.begin(), indices.end(), 0);
+#ifdef NO_MULTITHREAD
+          auto &rng_ = rng;
+#else
+          RNG rng_(seed);
+#endif
+          TreeType tree(maxDepth, minNodesize, rng_, terminalNodeFunc,
+                        strategy);
+          if (resample_) {
+            tree.fit(
+                train_data,
+                treeson::utils::bootstrap_sample(indices, bootstrap_size, rng_),
+                nosplit_features);
+          } else {
+            tree.fit(train_data, indices, nosplit_features);
+          }
+          if (tree.is_uninformative()) {
+            // make it clear that this tree does not count
+            return;
+          }
+          std::vector<size_t> pred_indices =
+              utils::make_index_range(utils::size(predict_data[0]));
+          auto prediction_result =
+              tree.template predict<utils::is_invocable_with<
+                  Accumulator,
+                  std::vector<utils::value_type_t<ResultType>>>::value>(
+                  predict_data, pred_indices);
+          accumulator_(prediction_result);
         }
-        if (tree.is_uninformative()) {
-          // make it clear that this tree does not count
-          return;
-        }
-        std::vector<size_t> pred_indices(std::visit(
-            [](auto &&arg) -> size_t { return arg.size(); }, predict_data[0]));
-        std::iota(pred_indices.begin(), pred_indices.end(), 0);
-        auto prediction_result = tree.template predict<utils::is_invocable_with<
-            Accumulator, std::vector<utils::value_type_t<ResultType>>>::value>(
-            predict_data, pred_indices);
-        accumulator(prediction_result);
+#ifdef NO_MULTITHREAD
+        ();
+#else
+        );
+#endif
       }
-#ifdef NO_MULTITHREAD
-      ();
-#else
-      );
-#endif
     }
+    // move to accumulator that was passed in
+    accumulator = std::move(accumulator_.resource);
   }
   [[maybe_unused]] void prune() {
     // TODO(JSzitas): possibly add warning and print how many trees will be pruned?
@@ -1206,109 +1252,106 @@ public:
     );
   }
   // Feature importance method
-  template<typename Accumulator, typename Importance>
+  template<typename Accumulator, typename Metric, typename Importance>
   [[maybe_unused]] auto feature_importance(
       const std::vector<FeatureData> &train_data,
-      const std::vector<FeatureData> &predict_data,
       const size_t n_tree,
       const std::vector<size_t> &nosplit_features,
-      const bool resample = true,
+      const bool oob = true,
       const size_t sample_size = 0) {
     size_t bootstrap_size = sample_size > 0 ? sample_size :
-                                            std::visit([](auto&& arg) -> size_t { return arg.size(); }, train_data[0]);
-    const bool resample_ = resample && sample_size > 0;
-    if(resample != resample_) {
-      std::cout << "You specified 'resample = true', " <<
-          "but provided 'sample_size = 0'. Quitting, respecify." << std::endl;
-    }
-    std::vector<Accumulator> accumulators(train_data.size() + 1 -
-                                          nosplit_features.size());
+                                            utils::size(train_data[0]);
+    // we do not allow resampling as such here because it complicates the interface
+    // and leaves us in an equal 'in-bag error' situation as if sample size was just set
+    // to total size.
+    std::vector<size_t> indices = utils::make_index_range(utils::size(train_data[0]));
+    /* N.B.: outer scope forces thread-pool to finish - important!!!
+     without this we can proceed onto the importance stuff BEFORE we have
+     any results, so this MUST be closed off.*/
 #ifndef NO_MULTITHREAD
-    std::vector<size_t> seeds(n_tree);
-    for(auto& seed : seeds) {
-      seed = rng();
-    }
-    threading::ThreadPool pool;
-#endif
-    for (size_t i = 0; i < n_tree; ++i) {
-#ifdef NO_MULTITHREAD
-      [this, &train_data, &predict_data,
-       &accumulators, &nosplit_features,
-       resample_, bootstrap_size]() {
+    std::vector<threading::SharedResourceWrapper<Accumulator>>
+        accumulators(train_data.size() + 1);
 #else
-      pool.enqueue([this, &train_data, &predict_data, &accumulators,
-                    &nosplit_features, resample_, &seeds, bootstrap_size, i] {
+    std::vector<Accumulator> accumulators(train_data.size() + 1);
 #endif
-        std::vector<size_t> indices(
-            std::visit([](auto&& arg) -> size_t {
-              return arg.size();
-            }, train_data[0]));
-        std::iota(indices.begin(), indices.end(), 0);
+    /* N.B.: outer scope forces thread-pool to finish - important!!!
+ without this we can proceed onto the importance stuff BEFORE we have
+ any results, so this MUST be closed off.*/
+    {
+#ifndef NO_MULTITHREAD
+      threading::ThreadPool pool;
+#endif
+      for (size_t i = 0; i < n_tree; ++i) {
 #ifdef NO_MULTITHREAD
-        auto& rng_ = rng;
+        [this, &train_data, &indices, &accumulators, &nosplit_features,
+         bootstrap_size, oob]() {
 #else
-        RNG rng_(seeds[i]);
+        const auto seed = rng();
+        pool.enqueue([this, &train_data, &accumulators, &indices,
+                      &nosplit_features, seed, bootstrap_size, oob] {
 #endif
-        TreeType tree(maxDepth, minNodesize, rng_, terminalNodeFunc, strategy);
-        if (resample_) {
-          tree.fit(train_data, bootstrap_sample(indices, bootstrap_size), nosplit_features);
-        } else {
-          tree.fit(train_data, indices, nosplit_features);
+#ifdef NO_MULTITHREAD
+          auto &rng_ = rng;
+#else
+          RNG rng_(seed);
+#endif
+          TreeType tree(maxDepth, minNodesize, rng_, terminalNodeFunc,
+                        strategy);
+          std::vector<size_t> train_indices, test_indices;
+          if (oob) {
+            std::tie(train_indices, test_indices) =
+                treeson::utils::bootstrap_two_samples(indices, bootstrap_size,
+                                                      rng_);
+          } else {
+            train_indices =
+                treeson::utils::bootstrap_sample(indices, bootstrap_size, rng_);
+            test_indices = train_indices;
+          }
+          tree.fit(train_data, train_indices, nosplit_features);
+          if (tree.is_uninformative()) {
+            // make it clear that this tree does not count
+            return;
+          }
+          auto used_features = tree.used_features();
+          // compute baseline - update first accumulator
+          accumulators[0](
+              tree.template eval_oob<Metric>(train_data, test_indices));
+          // update all other accumulators
+          for (const auto feature : used_features) {
+            accumulators[feature + 1](tree.template eval_oob<Metric>(
+                train_data, test_indices, feature));
+          }
         }
-        if(tree.is_uninformative()) {
-          // make it clear that this tree does not count
-          return;
-        }
-        std::vector<size_t> pred_indices(
-            std::visit([](auto&& arg) -> size_t {
-              return arg.size();
-            }, predict_data[0]));
-        std::iota(pred_indices.begin(), pred_indices.end(), 0);
-        using res_type = decltype(tree.template predict<utils::is_invocable_with<
-                                      Accumulator,
-                                      std::vector<utils::value_type_t<ResultType>>>::value>(
-          predict_data, pred_indices));
-        auto used_features = tree.used_features();
-        // we only have to iterate over the above; thus we are
-        // only updating certain accumulators
-        std::vector<res_type> updates(used_features.size());
-        // compute baseline - update first accumulator
-        if constexpr (utils::is_invocable_with<
-                          Accumulator,
-                          std::vector<utils::value_type_t<ResultType>>>::value) {
-          updates[0] = tree.template predict<true>(predict_data, pred_indices);
-        } else {
-          updates[0] = tree.template predict<false>(predict_data, pred_indices);
-        }
-        size_t feature_i = 1;
-        for(const auto feature : used_features) {
-            updates[feature_i++] = tree.template predictWithoutFeature<utils::is_invocable_with<
-                                   Accumulator,
-                                   std::vector<utils::value_type_t<ResultType>>>::value>(
-                predict_data, pred_indices, feature);
-        }
-        accumulators[0](updates[0]);
-        for(feature_i = 1; feature_i < updates.size(); feature_i++) {
-          accumulators[feature_i](updates[feature_i]);
-        }
+#ifdef NO_MULTITHREAD
+        ();
+#else
+        );
+#endif
       }
-#ifdef NO_MULTITHREAD
-      ();
-#else
-      );
-#endif
     }
     // convert from accumulator values to importances
-    Importance importance;
+    Importance importance_;
+#ifndef NO_MULTITHREAD
     // whatever the invocation over two accumulators produces :)
-    std::vector<decltype(importance(accumulators.front().result(),
-                                    accumulators.front().result()))>
-        importances;
+    std::vector<decltype(importance_(accumulators.front().resource.result(),
+                                     accumulators.front().resource.result())
+                             )> importances(accumulators.size()-1);
+    const auto baseline_results = accumulators.front().resource.result();
+    for (size_t feature_i = 0; feature_i < accumulators.size()-1; feature_i++) {
+      importances[feature_i] = importance_(
+          baseline_results, accumulators[feature_i+1].resource.result());
+    }
+#else
+    // same as above, but sans .resource everywhere
+    std::vector<decltype(importance_(accumulators.front().result(),
+                                     accumulators.front().result())
+                             )> importances(accumulators.size()-1);
     const auto baseline_results = accumulators.front().result();
     for (size_t feature_i = 0; feature_i < accumulators.size()-1; feature_i++) {
-      const auto feature_results = accumulators[feature_i+1].result();
-      importances[feature_i] = importance(baseline_results, feature_results);
+      importances[feature_i] = importance_(
+          baseline_results, accumulators[feature_i+1].result());
     }
+#endif
     return importances;
   }
   [[maybe_unused]] void print() {
@@ -1323,16 +1366,6 @@ private:
   ResultF& terminalNodeFunc;
   SplitStrategy& strategy;
   std::vector<TreeType> trees;
-
-  std::vector<size_t> bootstrap_sample(const std::vector<size_t>& indices,
-                                       const size_t sample_size) {
-    std::uniform_int_distribution<size_t> dist(0, indices.size() - 1);
-    std::vector<size_t> bootstrap_indices(sample_size);
-    for (auto &index : bootstrap_indices) {
-      index = indices[dist(rng)];
-    }
-    return bootstrap_indices;
-  }
 };
 /*
 // TODO(JSzitas): first implementation of gradient boosting,

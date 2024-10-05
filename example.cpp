@@ -83,6 +83,25 @@ int main() {
   }
   std::cout << std::endl;
 
+  std::cout << "Trying prediction w/o feature 1" << std::endl;
+  const auto& pred_wo_feature = tree.predictWithoutFeature(data, 1);
+  std::cout << "Prediction successful" << std::endl;
+
+  // Print predictions
+  std::cout << "Predictions: " << std::endl;
+  pred_id = 0;
+  for (const auto& prediction : pred_wo_feature.expand_result()) {
+    std::cout << "Prediction id: "<< pred_id++ << "; ";
+    for (const auto index : prediction) {
+      std::cout << index << " ";
+    }
+    std::cout << "|\n";
+  }
+  std::cout << std::endl;
+
+  return 0;
+
+
   treeson::RandomForest<resultFunc, std::mt19937, strat,
                         32, double, int> forest(4, 1, rng, res_functor, strat_obj);
   forest.fit(data, size_t(10), std::vector<size_t>{}, false, size_t(0));

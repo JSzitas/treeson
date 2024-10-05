@@ -9,7 +9,8 @@ add_library(treeson example.cpp)
 include_directories(/usr/local/include)
 link_directories(/usr/local/lib)
 
-add_executable(multitarg_example example_multitarg.cpp)  # Replace main.cpp with your source file
+add_executable(multitarg_example example_multitarg.cpp)
+add_executable(profile example_multitarg.cpp)
 
 target_link_libraries(multitarg_example arrow parquet)
 

@@ -97,6 +97,7 @@ class CSVWriter {
 public:
   using FeatureData = std::variant<
       std::vector<IntegralType>, std::vector<FloatingType>>;
+  using FloatingData = std::vector<std::vector<FloatingType>>;
 
   template<const bool headers, const bool row_names>
   static void write_data(const std::string& filename,
@@ -139,6 +140,49 @@ public:
             file << arg[row];
           }
         }, data[col]);
+      }
+      file << "\n";
+    }
+    file.close();
+  }
+  template<const bool headers, const bool row_names>
+  static void write_data(const std::string& filename,
+                         const std::vector<std::string>& header_names,
+                         const std::vector<std::string>& row_names_data,
+                         const FloatingData& data)
+  {
+    std::ofstream file(filename);
+
+    if (!file.is_open()) {
+      throw std::runtime_error("Failed to open CSV file.");
+    }
+
+    if constexpr (headers) {
+      if constexpr (row_names) {
+        file << "RowNames,";
+      }
+      for (size_t i = 0; i < header_names.size(); i++) {
+        if (i != 0) file << ",";
+        file << header_names[i];
+      }
+      file << "\n";
+    }
+
+    size_t numRows = data.size();
+
+    for (size_t row = 0; row < numRows; row++) {
+      if constexpr (row_names) {
+        if (!row_names_data.empty()) {
+          file << row_names_data[row];
+        } else {
+          file << row;
+        }
+        file << ",";
+      }
+
+      for (size_t col = 0; col < data[row].size(); col++) {
+        if (col != 0) file << ",";
+        file << data[row][col];
       }
       file << "\n";
     }
