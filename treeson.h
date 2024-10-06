@@ -185,7 +185,6 @@ rmse(const std::vector<scalar_t>& x,
   const size_t n = x.size();
   scalar_t res = 0.0;
   for(size_t i = 0; i < n; i++) {
-    //std::cout << "res: " << res << " x-y: " << x[i]-y[i] << std::endl;
     res += std::pow(x[i]-y[i],2);
   }
   res /= static_cast<scalar_t>(n);
@@ -316,21 +315,27 @@ struct [[maybe_unused]] SharedResourceWrapper{
     std::lock_guard<std::mutex> lock(m_mutex);
     return resource(std::forward<Args>(args)...);
   }
+  template<typename Index>
+  auto operator[](Index&& index) -> decltype(resource[std::forward<Index>(index)]) {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    return resource[std::forward<Index>(index)];
+  }
+  template<typename Index>
+  auto operator[](Index&& index) const -> decltype(resource[std::forward<Index>(index)]) {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    return resource[std::forward<Index>(index)];
+  }
   // Proxy that locks mutex and forwards calls to the resource
   class Proxy {
     std::lock_guard<std::mutex> lock;
     SharedResource& resource;
-
   public:
     Proxy(std::mutex& mtx, SharedResource& res)
         : lock(mtx), resource(res) {}
-
-    // Forward calls to the resource using the arrow operator
     SharedResource* operator->() {
       return &resource;
     }
   };
-
   // Operator-> to create and return the proxy
   Proxy operator->() {
     return Proxy(m_mutex, resource);
@@ -347,24 +352,45 @@ public:
     return std::find(data.begin(), data.begin() + size, value) !=
            data.begin() + size;
   }
-  // possibly just void?
-  bool add(const integral_t value) noexcept {
+  void add(const integral_t value) noexcept {
     if (size < MaxCategoricalSet) {
       data[size++] = value;
-      return true;
     }
-    return false;
   }
 };
-
+// specialization for empty sets; this should be something the compiler can
+// entirely optimize away
+template <typename integral_t>
+class FixedCategoricalSet<0, integral_t> {
+public:
+  FixedCategoricalSet() = default;
+  [[nodiscard]] bool contains(const size_t value) const noexcept {return false;}
+  void add(const integral_t value) noexcept {}
+};
+template <typename integral_t>
+class FixedCategoricalSet<1, integral_t> {
+private:
+  integral_t data{};
+  bool occupied = false;
+public:
+  FixedCategoricalSet() = default;
+  [[nodiscard]] bool contains(const size_t value) const noexcept {
+    return occupied && data == value;
+  }
+  void add(const integral_t value) noexcept {
+    if (!occupied) {
+      data = value;
+      occupied = true;
+    }
+  }
+};
 template <typename scalar_t, typename integral_t,
           const size_t MaxCategoricalSet> class Node {
 public:
-  size_t featureIndex;
-  std::variant<scalar_t, FixedCategoricalSet<MaxCategoricalSet, integral_t>> threshold;
-  size_t terminal_index = std::numeric_limits<size_t>::max();
-  std::array<size_t, 2> child_index = {0, 0}; // Left, Right
+  size_t featureIndex, terminal_index;
+  std::array<size_t, 2> child_index = {0, 0};
   bool missing_goes_right;
+  std::variant<scalar_t, FixedCategoricalSet<MaxCategoricalSet, integral_t>> threshold;
   Node()
       : featureIndex(std::numeric_limits<size_t>::max()), terminal_index(0),
         missing_goes_right(false) {}
@@ -388,7 +414,6 @@ template <typename Key, typename Value, const size_t MaxSize>
 class FixedSizeMap {
 public:
   FixedSizeMap() : size_(0) {}
-
   [[maybe_unused]] void add(const Key &key, const Value &value) {
     size_t idx = find(key);
     if (idx != size_) {
@@ -398,7 +423,6 @@ public:
       ++size_;
     }
   }
-
   Value &operator[](const Key &key) {
     size_t idx = find(key);
     if (idx == size_) { // New key
@@ -407,7 +431,6 @@ public:
     }
     return data[idx].second;
   }
-
   const Value &operator[](const Key &key) const {
     size_t idx = find(key);
     if (idx == size_) {
@@ -415,13 +438,10 @@ public:
     }
     return data[idx].second;
   }
-
   [[nodiscard]] size_t size() const { return size_; }
-
 private:
   std::array<std::pair<Key, Value>, MaxSize> data;
   size_t size_;
-
   size_t find(const Key &key) const {
     for (size_t i = 0; i < size_; ++i) {
       if (data[i].first == key) {
@@ -431,6 +451,16 @@ private:
     return size_;
   }
 };
+template <typename Key, typename Value>
+class FixedSizeMap<Key, Value, 0> {
+public:
+  FixedSizeMap() = default;
+  FixedSizeMap<Key, Value, 0>(const FixedSizeMap<Key, Value, 0>&) = default;
+  [[maybe_unused]] void add(const Key&, const Value&) {}
+  [[nodiscard]] size_t size() const { return 0; }
+};
+
+
 template <typename ResultType>
 struct TreePredictionResult {
   std::vector<size_t> indices;
@@ -471,7 +501,6 @@ struct TreePredictionResult {
 };
 }
 namespace splitters {
-
 template <typename RNG, typename scalar_t = double,
           typename integral_t = size_t,
           const size_t MaxCategoricalSet = 10>
@@ -727,7 +756,8 @@ template<typename scalar_t> struct defaultImportanceReducer {
     }
     return sum/static_cast<scalar_t>(size);
   }
-  std::vector<scalar_t> operator()(const std::vector<std::pair<std::vector<scalar_t>, size_t>>& x) {
+  std::vector<scalar_t> operator()(
+      const std::vector<std::pair<std::vector<scalar_t>, size_t>>& x) {
     std::vector<scalar_t> sums(x[0].first.size(), 0.);
     size_t sum_index = 0;
     for(auto& sum : sums) {
@@ -742,12 +772,17 @@ template<typename scalar_t> struct defaultImportanceReducer {
     return sums;
   }
 };
+
+
+
 }
 template <typename ResultF, typename RNG, typename SplitStrategy,
           const size_t MaxCategoricalSet = 32, typename scalar_t = double,
           typename integral_t = size_t>
 class RandomTree {
-  using FeatureData = std::variant<std::vector<integral_t>, std::vector<scalar_t>>;
+  using FeatureData = std::variant<
+      std::vector<integral_t>,
+      std::vector<scalar_t>>;
   // public:
   using ResultType = decltype(std::declval<ResultF>()(
       std::declval<std::vector<size_t> &>(), std::declval<size_t>(),
@@ -1022,14 +1057,14 @@ private:
   size_t reorder_indices(const std::vector<FeatureData>& data,
                          const treeson::containers::Node<scalar_t, integral_t, MaxCategoricalSet>& node,
                          const size_t start, const size_t end, std::vector<size_t>& indices) const {
-    auto featureData = data[node.featureIndex];
+    auto& featureData = data[node.featureIndex];
     const auto miss_dir = node.getMIADirection();
     size_t mid = start;
     if (node.isCategorical()) {
       const auto &catSet = node.getCategoricalSet();
       const auto &catData = std::get<std::vector<integral_t>>(featureData);
       for (size_t i = start; i < end; ++i) {
-        const auto &val = catData[indices[i]];
+        const auto val = catData[indices[i]];
         if (catSet.contains(val)) {
           std::swap(indices[i], indices[mid]);
           ++mid;
@@ -1039,7 +1074,7 @@ private:
       const auto &numThreshold = node.getNumericThreshold();
       const auto &numData = std::get<std::vector<scalar_t>>(featureData);
       for (size_t i = start; i < end; ++i) {
-        const auto &val = numData[indices[i]];
+        const auto val = numData[indices[i]];
         if ((val <= numThreshold) || (std::isnan(val) && miss_dir)) {
           std::swap(indices[i], indices[mid]);
           ++mid;
@@ -1096,8 +1131,7 @@ public:
 #endif
       for (size_t i = 0; i < n_tree; ++i) {
 #ifdef NO_MULTITHREAD
-        [this, &data, &nosplit_features, resample_, bootstrap_size,
-         i]() {
+        [this, &data, &nosplit_features, resample_, bootstrap_size]() {
 #else
         const size_t seed = rng();
         pool.enqueue([this, &data, &trees_, &nosplit_features, resample_, seed,
@@ -1243,7 +1277,6 @@ public:
     accumulator = std::move(accumulator_.resource);
   }
   [[maybe_unused]] void prune() {
-    // TODO(JSzitas): possibly add warning and print how many trees will be pruned?
     trees.erase(
         std::remove_if(trees.begin(), trees.end(), [](const TreeType &tree) {
           return tree.is_uninformative();
