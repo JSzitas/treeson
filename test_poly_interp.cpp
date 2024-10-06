@@ -35,32 +35,22 @@ int main() {
           }
         }
       }, data[id]);
-      //std::cout << "min, max: "<< min_ << ", " << max_ << std::endl;
       return {min_, max_};
     };
   };
   using strat =
-      treeson::splitters::ExtremelyRandomizedStrategy<std::mt19937, double, 32>;
-  // auto res_functor = resultFunc();
+      treeson::splitters::ExtremelyRandomizedStrategy<std::mt19937, double, size_t, 0>;
   auto res_functor = resultFuncRange(2);
   auto strat_obj = strat{};
 
   CSVLoader<size_t, double> loader;
   DataType data = loader.load_data<true, true>("test_data/polyn_A.csv");
-  //print_data(data);
-  auto [train, test] = train_test_split(data, 0.7);//995);
-  //print_data(test, 10000);
-  //return 0;
+  auto [train, test] = train_test_split(data, 0.7);
   treeson::RandomForest<decltype(res_functor), std::mt19937, strat,
-                        32, double> forest(8, 8, rng, res_functor, strat_obj);
-
-  //forest.fit(train, 1, {2}, true, 128);
-  //forest.print();
-  //return 0;
-
+                        0, double> forest(8, 8, rng, res_functor, strat_obj);
 
   struct RangeAccumulator{
-    const size_t id;
+    size_t id;
     std::vector<double> min_, max_;
     explicit RangeAccumulator(const size_t id,
                               const size_t pred_size) : id(id) {
@@ -69,8 +59,6 @@ int main() {
     }
     void operator()(const treeson::containers::TreePredictionResult<std::array<double,2>>& x) {
       const auto& x_ = x.expand_result();
-      //treeson::utils::print_vector_of_pairs(x_);
-      //std::cout << "x size: " << x_.size() << std::endl;
       for(size_t i = 0; i < x_.size(); i++) {
         min_[i] = std::max(min_[i], x_[i][0]);
         max_[i] = std::min(max_[i], x_[i][1]);

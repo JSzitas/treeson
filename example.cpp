@@ -7,8 +7,8 @@
 
 int main() {
   // Simplified pseudocode for testing:
-
-  using DataType = std::vector<std::variant<std::vector<int>, std::vector<double>>>;
+  using scalar_t = double;
+  using DataType = std::vector<std::variant<std::vector<int>, std::vector<scalar_t>>>;
 
   // RNG and Result function
   std::mt19937 rng(22); // NOLINT(*-msc51-cpp)
@@ -27,37 +27,37 @@ int main() {
   };
   // Mock result function
   using strat = treeson::splitters::ExtremelyRandomizedStrategy<std::mt19937,
-                                                                double, int, 32>;
+                                                                scalar_t, int, 32>;
 
 
   auto res_functor = resultFunc{};
   auto strat_obj = strat{};
   // Creating tree
   treeson::RandomTree<resultFunc, std::mt19937, strat,
-                          32, double, int> tree(3, 1, rng, res_functor, strat_obj);
+                          32, scalar_t, int> tree(3, 1, rng, res_functor, strat_obj);
 
   // Example data (simplified)
   /*
-  std::vector<std::variant<std::vector<size_t>, std::vector<double>>> data = {
-      std::vector<double>{0.5, 0.3, 0.6, 0.9, 0.2},
+  std::vector<std::variant<std::vector<size_t>, std::vector<scalar_t>>> data = {
+      std::vector<scalar_t>{0.5, 0.3, 0.6, 0.9, 0.2},
       std::vector<size_t>{1, 2, 3, 2, 1}
   };*/
 
   // Example data (larger)
   DataType data = {
       // Numeric features
-      std::vector<double>{0.5, 0.4, 0.6, 1.5, std::nan(""), 1.4, 1.6, 2.5, 2.4, 2.6, 3.5, 3.4, 3.6, 4.5, 4.4, 4.6},
-      std::vector<double>{1.5, 1.4, std::nan(""),1.6, 0.5, 0.4, 0.6, 3.5, 3.4, 3.6, 2.5, 2.4, 2.6, 4.5, 4.4, 4.6},
+      std::vector<scalar_t>{0.5, 0.4, 0.6, 1.5, std::nan(""), 1.4, 1.6, 2.5, 2.4, 2.6, 3.5, 3.4, 3.6, 4.5, 4.4, 4.6},
+      std::vector<scalar_t>{1.5, 1.4, std::nan(""),1.6, 0.5, 0.4, 0.6, 3.5, 3.4, 3.6, 2.5, 2.4, 2.6, 4.5, 4.4, 4.6},
 
       // Categorical features
       std::vector<int>{1, 2, 3, 1, 2, 3, 1, 1, 1, 3, 1, 2, 3, 1, 2, 3},
       std::vector<int>{4, 5, 6, 4, 5, 6, 4, 5, 3, 6, 4, 5, 6, 4, 5, 6}
   };
-  std::vector<size_t> indices(std::get<std::vector<double>>(data[0]).size());
+  std::vector<size_t> indices(std::get<std::vector<scalar_t>>(data[0]).size());
   std::iota(indices.begin(), indices.end(), 0);
 
-  /*std::cout << "Fun:" << resultFunc(std::get<std::vector<double>>(data[0]).begin(),
-                                    std::get<std::vector<double>>(data[0]).end(),
+  /*std::cout << "Fun:" << resultFunc(std::get<std::vector<scalar_t>>(data[0]).begin(),
+                                    std::get<std::vector<scalar_t>>(data[0]).end(),
                                     data) << std::endl;
   */
   tree.fit(data, indices, std::vector<size_t>{});
@@ -83,30 +83,10 @@ int main() {
   }
   std::cout << std::endl;
 
-  std::cout << "Trying prediction w/o feature 1" << std::endl;
-  const auto& pred_wo_feature = tree.predictWithoutFeature(data, 1);
-  std::cout << "Prediction successful" << std::endl;
-
-  // Print predictions
-  std::cout << "Predictions: " << std::endl;
-  pred_id = 0;
-  for (const auto& prediction : pred_wo_feature.expand_result()) {
-    std::cout << "Prediction id: "<< pred_id++ << "; ";
-    for (const auto index : prediction) {
-      std::cout << index << " ";
-    }
-    std::cout << "|\n";
-  }
-  std::cout << std::endl;
-
-  return 0;
-
-
   treeson::RandomForest<resultFunc, std::mt19937, strat,
-                        32, double, int> forest(4, 1, rng, res_functor, strat_obj);
+                        32, scalar_t, int> forest(4, 1, rng, res_functor, strat_obj);
   forest.fit(data, size_t(10), std::vector<size_t>{}, false, size_t(0));
   const auto& predictions_forest = forest.predict(data);
-  //forest.prune();
 
   size_t tree_id = 0;
   for(const auto& pred: predictions_forest) {
