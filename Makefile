@@ -22,5 +22,5 @@ poly_interp:
 	clang++ -std=c++17 -O2 -ggdb -Wall test_poly_interp.cpp -o poly.o; ./poly.o
 
 clean:
-	rm example.o profile.o profile_m.o profile_b.o
+	rm example.o profile.o profile_m.o profile_b.o poly.o
 
