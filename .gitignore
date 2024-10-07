@@ -7,3 +7,4 @@ cmake-build-debug/
 *.csv
 test_data/*.parquet
 perf.data
+*.bin

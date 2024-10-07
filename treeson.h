@@ -2,6 +2,7 @@
 #include <vector>
 #include <variant>
 #include <array>
+#include <fstream>
 #include <optional>
 #include <algorithm> // for std::find
 #include <limits>
@@ -39,7 +40,10 @@ struct is_container<
            false,
            is_container_helper<typename T::value_type, typename T::size_type,
                                typename T::allocator_type, typename T::iterator,
-                               typename T::const_iterator>,
+                               typename T::const_iterator,
+                               decltype(std::declval<T>().size()),
+                               decltype(std::declval<T>().begin()),
+                               decltype(std::declval<T>().end())>,
            void>> : public std::true_type {};
 template<typename Accumulator, typename Arg>
 struct is_invocable_with {
@@ -340,6 +344,12 @@ struct [[maybe_unused]] SharedResourceWrapper{
   Proxy operator->() {
     return Proxy(m_mutex, resource);
   }
+  // enables serialization of objects via buffer if resource is a buffer
+  // this is not entirely the cleanest, but it will suffice
+  template<typename T> void serialize(T& x) {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    x.serialize(resource);
+  }
 };
 }
 namespace containers {
@@ -357,6 +367,14 @@ public:
       data[size++] = value;
     }
   }
+  void serialize(std::ostream& os) const {
+    os.write(reinterpret_cast<const char*>(&size), sizeof(size));
+    os.write(reinterpret_cast<const char*>(data.data()), sizeof(integral_t) * size);
+  }
+  void deserialize(std::istream& is) {
+    is.read(reinterpret_cast<char*>(&size), sizeof(size));
+    is.read(reinterpret_cast<char*>(data.data()), sizeof(integral_t) * size);
+  }
 };
 // specialization for empty sets; this should be something the compiler can
 // entirely optimize away
@@ -366,6 +384,8 @@ public:
   FixedCategoricalSet() = default;
   [[nodiscard]] bool contains(const size_t value) const noexcept {return false;}
   void add(const integral_t value) noexcept {}
+  void serialize(std::ostream& os) const {}
+  void deserialize(std::istream& is) {}
 };
 template <typename integral_t>
 class FixedCategoricalSet<1, integral_t> {
@@ -383,12 +403,22 @@ public:
       occupied = true;
     }
   }
+  void serialize(std::ostream& os) const {
+    os.write(reinterpret_cast<const char*>(&occupied), sizeof(occupied));
+    if (occupied) {
+      os.write(reinterpret_cast<const char*>(&data), sizeof(data));
+    }
+  }
+  void deserialize(std::istream& is) {
+    is.read(reinterpret_cast<char*>(&occupied), sizeof(occupied));
+    if (occupied) {
+      is.read(reinterpret_cast<char*>(&data), sizeof(data));
+    }
+  }
 };
 template <typename scalar_t, typename integral_t,
-          const size_t MaxCategoricalSet> class Node {
-public:
-  size_t featureIndex, terminal_index;
-  std::array<size_t, 2> child_index = {0, 0};
+          const size_t MaxCategoricalSet> struct Node {
+  size_t featureIndex, terminal_index, left = 0, right = 0;
   bool missing_goes_right;
   std::variant<scalar_t, FixedCategoricalSet<MaxCategoricalSet, integral_t>> threshold;
   Node()
@@ -409,6 +439,41 @@ public:
     return missing_goes_right;
   }
   void assign_terminal(const size_t index) { terminal_index = index; }
+  void serialize(std::ostream& os) const {
+    os.write(reinterpret_cast<const char*>(&featureIndex), sizeof(featureIndex));
+    os.write(reinterpret_cast<const char*>(&terminal_index), sizeof(terminal_index));
+    os.write(reinterpret_cast<const char*>(&left), sizeof(left));
+    os.write(reinterpret_cast<const char*>(&right), sizeof(right));
+    os.write(reinterpret_cast<const char*>(&missing_goes_right), sizeof(missing_goes_right));
+
+    bool is_categorical = isCategorical();
+    os.write(reinterpret_cast<const char*>(&is_categorical), sizeof(is_categorical));
+    if (is_categorical) {
+      getCategoricalSet().serialize(os);
+    } else {
+      scalar_t threshold_value = getNumericThreshold();
+      os.write(reinterpret_cast<const char*>(&threshold_value), sizeof(threshold_value));
+    }
+  }
+  void deserialize(std::istream& is) {
+    is.read(reinterpret_cast<char*>(&featureIndex), sizeof(featureIndex));
+    is.read(reinterpret_cast<char*>(&terminal_index), sizeof(terminal_index));
+    is.read(reinterpret_cast<char*>(&left), sizeof(left));
+    is.read(reinterpret_cast<char*>(&right), sizeof(right));
+    is.read(reinterpret_cast<char*>(&missing_goes_right), sizeof(missing_goes_right));
+
+    bool is_categorical;
+    is.read(reinterpret_cast<char*>(&is_categorical), sizeof(is_categorical));
+    if (is_categorical) {
+      FixedCategoricalSet<MaxCategoricalSet, integral_t> categorical_set;
+      categorical_set.deserialize(is);
+      threshold = categorical_set;
+    } else {
+      scalar_t threshold_value;
+      is.read(reinterpret_cast<char*>(&threshold_value), sizeof(threshold_value));
+      threshold = threshold_value;
+    }
+  }
 };
 template <typename Key, typename Value, const size_t MaxSize>
 class FixedSizeMap {
@@ -459,8 +524,6 @@ public:
   [[maybe_unused]] void add(const Key&, const Value&) {}
   [[nodiscard]] size_t size() const { return 0; }
 };
-
-
 template <typename ResultType>
 struct TreePredictionResult {
   std::vector<size_t> indices;
@@ -499,6 +562,69 @@ struct TreePredictionResult {
     return flattened_results;
   }
 };
+}
+namespace serializers{
+template <typename T>
+std::enable_if_t<std::is_arithmetic_v<T>> serialize(const T& value, std::ostream& os) {
+  os.write(reinterpret_cast<const char*>(&value), sizeof(value));
+}
+template <typename T>
+std::enable_if_t<std::is_arithmetic_v<T>> deserialize(T& value, std::istream& is) {
+  is.read(reinterpret_cast<char*>(&value), sizeof(value));
+}
+template <typename T>
+void serialize(const std::vector<T>& vec, std::ostream& os) {
+  size_t size = vec.size();
+  os.write(reinterpret_cast<const char*>(&size), sizeof(size));
+  for (const auto& element : vec) {
+    serialize(element, os);
+  }
+}
+template <typename T>
+void deserialize(std::vector<T>& vec, std::istream& is) {
+  size_t size;
+  is.read(reinterpret_cast<char*>(&size), sizeof(size));
+  vec.resize(size);
+  for (auto& element : vec) {
+    deserialize(element, is);
+  }
+}
+template <typename T, size_t N>
+void serialize(const std::array<T, N>& arr, std::ostream& os) {
+  for (const auto& element : arr) {
+    serialize(element, os);
+  }
+}
+template <typename T, size_t N>
+void deserialize(std::array<T, N>& arr, std::istream& is) {
+  for (auto& element : arr) {
+    deserialize(element, is);
+  }
+}
+template <typename ResultType>
+void serialize(const containers::TreePredictionResult<ResultType>& result, std::ostream& os) {
+  serialize(result.indices, os);
+  size_t size = result.results.size();
+  os.write(reinterpret_cast<const char*>(&size), sizeof(size));
+  for (const auto& pair : result.results) {
+    serialize(pair.first.first, os);
+    serialize(pair.first.second, os);
+    serialize(pair.second, os);
+  }
+}
+
+template <typename ResultType>
+void deserialize(containers::TreePredictionResult<ResultType>& result, std::istream& is) {
+  deserialize(result.indices, is);
+  size_t size;
+  is.read(reinterpret_cast<char*>(&size), sizeof(size));
+  result.results.resize(size);
+  for (auto& pair : result.results) {
+    deserialize(pair.first.first, is);
+    deserialize(pair.first.second, is);
+    deserialize(pair.second, is);
+  }
+}
 }
 namespace splitters {
 template <typename RNG, typename scalar_t = double,
@@ -772,9 +898,6 @@ template<typename scalar_t> struct defaultImportanceReducer {
     return sums;
   }
 };
-
-
-
 }
 template <typename ResultF, typename RNG, typename SplitStrategy,
           const size_t MaxCategoricalSet = 32, typename scalar_t = double,
@@ -783,7 +906,6 @@ class RandomTree {
   using FeatureData = std::variant<
       std::vector<integral_t>,
       std::vector<scalar_t>>;
-  // public:
   using ResultType = decltype(std::declval<ResultF>()(
       std::declval<std::vector<size_t> &>(), std::declval<size_t>(),
       std::declval<size_t>(),
@@ -793,7 +915,6 @@ class RandomTree {
   const size_t maxDepth, minNodesize;
   RNG &rng;
   ResultF &terminalNodeFunc;
-  std::unordered_set<size_t> uniqueValues;
   std::vector<ResultType> terminal_values;
   SplitStrategy &split_strategy;
 
@@ -807,7 +928,6 @@ public:
       : maxDepth(maxDepth), minNodesize(minNodesize), rng(rng),
         terminalNodeFunc(terminalNodeFunc), split_strategy(strategy) {
     nodes.reserve(static_cast<size_t>(std::pow(2, maxDepth + 1) - 1));
-    uniqueValues = std::unordered_set<size_t>{};
     terminal_values = std::vector<ResultType>{};
   }
   [[maybe_unused]] void
@@ -923,8 +1043,56 @@ public:
         0, oob_data, indices, 0, indices.size(), results, excluded_feature);
     return Reducer()(results);
   }
-
-private:
+  void from_nodes(
+      std::vector<containers::Node<scalar_t, integral_t,
+                                   MaxCategoricalSet>> &&nodes,
+      std::vector<ResultType>&& terminal_values){
+      this->nodes = nodes;
+      this->terminal_values = terminal_values;
+    }
+    [[maybe_unused]] void save(const std::string &filename) {
+      std::ofstream out(filename + ".bin", std::ios::binary);
+      if (out) serialize(out);
+      out.close();
+    }
+    [[maybe_unused]] void load(const std::string &filename) {
+      std::ifstream in(filename + ".bin", std::ios::binary);
+      if (in) {
+        auto [deserialized_nodes, deserialized_terminal_values] =
+            deserialize(in);
+        from_nodes(std::move(deserialized_nodes),
+                   std::move(deserialized_terminal_values));
+      }
+      in.close();
+    }
+    void serialize(std::ostream& os) const {
+      size_t size = nodes.size();
+      os.write(reinterpret_cast<const char*>(&size), sizeof(size));
+      for (const auto& node : nodes) {
+        node.serialize(os);
+      }
+      size = terminal_values.size();
+      os.write(reinterpret_cast<const char*>(&size), sizeof(size));
+      for (const auto& value : terminal_values) {
+        serializers::serialize(value, os);
+      }
+    }
+    std::pair<std::vector<containers::Node<scalar_t, integral_t, MaxCategoricalSet>>,
+              std::vector<ResultType>> deserialize(std::istream& is) const {
+      size_t size;
+      is.read(reinterpret_cast<char*>(&size), sizeof(size));
+      std::vector<containers::Node<scalar_t, integral_t, MaxCategoricalSet>> deserialized_nodes(size);
+      for (auto& node : deserialized_nodes) {
+        node.deserialize(is);
+      }
+      is.read(reinterpret_cast<char*>(&size), sizeof(size));
+      std::vector<ResultType> deserialized_terminal_values(size);
+      for (auto& value : deserialized_terminal_values) {
+        serializers::deserialize(value, is);
+      }
+      return std::make_pair(std::move(deserialized_nodes), std::move(deserialized_terminal_values));
+    }
+  private:
   void buildTree(const std::vector<FeatureData> &data,
                  std::vector<size_t> &indices,
                  const std::vector<size_t> &available_features,
@@ -932,10 +1100,10 @@ private:
                  size_t depth = 0) noexcept {
     nodes.emplace_back();
     size_t nodeIndex = nodes.size() - 1;
-    if (nodes[parentIndex].child_index[0] == 0) {
-      nodes[parentIndex].child_index[0] = nodeIndex; // Left child
+    if (nodes[parentIndex].left == 0) {
+      nodes[parentIndex].left = nodeIndex; // Left child
     } else {
-      nodes[parentIndex].child_index[1] = nodeIndex; // Right child
+      nodes[parentIndex].right = nodeIndex; // Right child
     }
     split_strategy.select_split(data, indices, available_features, start, end,
                                 nodes[nodeIndex], rng);
@@ -963,7 +1131,7 @@ private:
                                     std::declval<const size_t>(), std::declval<const size_t>())),size_t>>& results,
       const size_t excluded_feature) const noexcept {
         const auto &node = nodes[nodeIndex];
-        if (node.child_index[0] == 0 && node.child_index[1] == 0) {
+        if (node.left == 0 && node.right == 0) {
           const auto& vals = terminal_values[node.terminal_index];
           results.push_back(std::pair(Metric()(vals, oob_data, indices, start, end), end-start));
           return;
@@ -972,10 +1140,10 @@ private:
           if (nodes[nodeIndex].featureIndex == excluded_feature) {
             // consider that this probably returns only per one of these branches
             eval_oob_impl<Metric, true>(
-                node.child_index[0], oob_data,
+                node.left, oob_data,
                 indices, start, end, results, excluded_feature);
             eval_oob_impl<Metric, true>(
-                node.child_index[1], oob_data,
+                node.right, oob_data,
                 indices, start, end, results, excluded_feature);
           }
         }
@@ -983,12 +1151,12 @@ private:
             oob_data, nodes[nodeIndex], start, end, indices);
         if (mid > start) {
           eval_oob_impl<Metric, false>(
-              node.child_index[0], oob_data,
+              node.left, oob_data,
               indices, start, mid, results, excluded_feature);
         }
         if (mid < end) {
           eval_oob_impl<Metric, false>(
-              node.child_index[1], oob_data,
+              node.right, oob_data,
               indices, mid, end, results, excluded_feature);
         }
     }
@@ -998,7 +1166,7 @@ private:
       return;
     }
     std::string indent(depth * 4, '-');
-    if (node.child_index[0] == 0) { //&& node.child_index[1] == 0) {
+    if (node.left == 0) {
       std::cout << indent << "Terminal Node [Value: ";
       utils::print_element(std::cout, terminal_values[node.terminal_index]);
       std::cout << ", index: " << node.terminal_index << "]" << std::endl;
@@ -1021,15 +1189,15 @@ private:
                 << "] | MIA: " << node.getMIADirection();
     }
     std::cout << std::endl;
-    print_node(node.child_index[0], depth + 1);
-    print_node(node.child_index[1], depth + 1);
+    print_node(node.left, depth + 1);
+    print_node(node.right, depth + 1);
   }
   template <const bool FlattenResults, typename ResultContainer>
   void predictSamples(size_t nodeIndex, const std::vector<FeatureData> &samples,
                       std::vector<size_t> &indices, const size_t start, const size_t end,
                       ResultContainer &predictionResult) const noexcept {
     const auto &node = nodes[nodeIndex];
-    if (node.child_index[0] == 0) { //&& node.child_index[1] == 0) {
+    if (node.left == 0) {
       // leaf node
       if constexpr (FlattenResults) {
         const auto &result_container = terminal_values[node.terminal_index];
@@ -1045,12 +1213,12 @@ private:
     auto mid = reorder_indices(samples, nodes[nodeIndex], start, end, indices);
     if (mid > start) {
       predictSamples<FlattenResults>(
-          node.child_index[0], samples,
+          node.left, samples,
           indices, start, mid, predictionResult);
     }
     if (mid < end) {
       predictSamples<FlattenResults>(
-          node.child_index[1], samples,
+          node.right, samples,
           indices, mid, end, predictionResult);
     }
   }
@@ -1084,7 +1252,6 @@ private:
     return mid;
   }
 };
-
 template <typename ResultF, typename RNG, typename SplitStrategy,
           const size_t MaxCategoricalSet = 32, typename scalar_t = double,
           typename integral_t = size_t>
@@ -1176,12 +1343,145 @@ public:
     trees = std::move(trees_.resource);
 #endif
   }
+  [[maybe_unused]] void fit(const std::vector<FeatureData> &data,
+                            const size_t n_tree,
+                            const std::vector<size_t> &nosplit_features,
+                            const std::string &file,
+                            const bool resample = true,
+                            const size_t sample_size = 0) {
+    size_t bootstrap_size =
+        sample_size > 0
+            ? sample_size
+            : utils::size(data[0]);
+    const bool resample_ = resample && sample_size > 0;
+    if (resample != resample_) {
+      std::cout << "You specified 'resample = true', "
+                << "but provided 'sample_size = 0'. Quitting, respecify."
+                << std::endl;
+      return;
+    }
+    std::ofstream out(file + ".bin", std::ios::binary);
+    out.write(reinterpret_cast<const char*>(&n_tree), sizeof(n_tree));
+#ifndef NO_MULTITHREAD
+    threading::SharedResourceWrapper<std::ofstream> out_(out);
+#endif
+    // N.B.: Outer scope forces thread pool to finish before we do anything
+    {
+#ifndef NO_MULTITHREAD
+      threading::ThreadPool pool;
+      // required for thread safety
+#endif
+      for (size_t i = 0; i < n_tree; ++i) {
+#ifdef NO_MULTITHREAD
+        [this, &data, &nosplit_features, resample_, bootstrap_size, &out]() {
+#else
+        const size_t seed = rng();
+        pool.enqueue([this, &data, &trees_, &nosplit_features, resample_, seed,
+                      bootstrap_size, &out_] {
+#endif
+          std::vector<size_t> indices =
+              utils::make_index_range(utils::size(data[0]));
+          // custom random number generator for this tree
+#ifndef NO_MULTITHREAD
+          RNG rng_(seed);
+#else
+          auto& rng_ = rng;
+#endif
+          TreeType tree(maxDepth, minNodesize, rng_, terminalNodeFunc,
+                        strategy);
+          if (resample_) {
+            tree.fit(
+                data,
+                treeson::utils::bootstrap_sample(indices, bootstrap_size, rng_),
+                nosplit_features);
+          } else {
+            tree.fit(data, indices, nosplit_features);
+          }
+#ifndef NO_MULTITHREAD
+          out_.serialize(tree);
+#else
+          tree.serialize(out);
+#endif
+        }
+#ifdef NO_MULTITHREAD
+        ();
+#else
+        );
+#endif
+      }
+    }
+  }
   [[nodiscard]] std::vector<containers::TreePredictionResult<ResultType>> predict(
       const std::vector<FeatureData> &samples) const noexcept {
     const size_t n = trees.size();
     std::vector<containers::TreePredictionResult<ResultType>> results(n);
+    {
+#ifndef NO_MULTITHREAD
+      threading::ThreadPool pool;
+      threading::SharedResourceWrapper<
+          std::vector<containers::TreePredictionResult<ResultType>>>
+          results_(results);
+#endif
+      for (size_t i = 0; i < trees.size(); ++i) {
+#ifdef NO_MULTITHREAD
+        results[i] = trees[i].predict(samples);
+#else
+        pool.enqueue([this, &results_, &samples, &i] {
+          results_[i] = trees[i].predict(samples);
+        });
+#endif
+      }
+    }
+#ifndef NO_MULTITHREAD
+    results = std:move(results_);
+#endif
+    return results;
+  }
+  [[maybe_unused]] [[nodiscard]]
+  std::vector<containers::TreePredictionResult<ResultType>> predict(
+    const std::vector<FeatureData> &samples,
+    const std::string &model_file) const noexcept {
+    std::ifstream in(model_file + ".bin", std::ios::binary);
+    size_t n;
+    in.read(reinterpret_cast<char*>(&n), sizeof(n));
+    std::vector<containers::TreePredictionResult<ResultType>> results(n);
+    {
+#ifndef NO_MULTITHREAD
+      threading::ThreadPool pool;
+      // shared resource to access the file
+      threading::SharedResourceWrapper<std::ifstream> in_(in);
+      threading::SharedResourceWrapper<
+          std::vector<containers::TreePredictionResult<ResultType>>
+          > results_(results);
+#endif
+      for (size_t i = 0; i < n; i++) {
+#ifdef NO_MULTITHREAD
+        TreeType tree(maxDepth, minNodesize, rng, terminalNodeFunc, strategy);
+        auto [nodes, values] = tree.deserialize(in);
+        tree.from_nodes(std::move(nodes),std::move(values));
+        results[i] = tree.predict(samples);
+#else
+        pool.enqueue([this, &results_, &samples, &i] {
+          TreeType tree(maxDepth, minNodesize, rng, terminalNodeFunc, strategy);
+          auto [nodes, values] = tree.deserialize(in_);
+          results_[i] = tree.from_nodes(std::move(nodes),
+                                        std::move(values)).predict(samples);
+        });
+#endif
+      }
+    }
+    return results;
+  }
+  /*
+  [[nodiscard]] void predict(
+      Accumulator& accumulator,
+      const std::vector<FeatureData> &samples,
+      const std::string &model_file) const noexcept {
+    const size_t n = trees.size();
+    std::vector<containers::TreePredictionResult<ResultType>> results(n);
 #ifndef NO_MULTITHREAD
     threading::ThreadPool pool;
+    threading::SharedResourceWrapper<Accumulator> accumulator_(accumulator);
 #endif
     for (size_t i = 0; i < trees.size(); ++i) {
 #ifdef NO_MULTITHREAD
@@ -1192,8 +1492,8 @@ public:
       });
 #endif
     }
-    return results;
   }
+   */
   template<typename Accumulator>
   [[maybe_unused]] void memoryless_predict(
       Accumulator& accumulator,
@@ -1392,7 +1692,46 @@ public:
       tree.print_tree_structure();
     std::cout << "\n";
   }
-
+  void serialize(std::ostream &os) const {
+    size_t size = trees.size();
+    os.write(reinterpret_cast<const char*>(&size), sizeof(size));
+    for (const auto &tree : trees) {
+      tree.serialize(os);
+    }
+  }
+  void deserialize(std::istream &in) {
+    size_t size;
+    in.read(reinterpret_cast<char*>(&size), sizeof(size));
+    for(size_t i = 0; i < size; i++) {
+      if(i < trees.size()) {
+      auto [nodes, values] = trees[i].deserialize(in);
+      trees[i].from_nodes(std::move(nodes), std::move(values));
+      } // otherwise we are appending
+      else{
+        TreeType tree(maxDepth, minNodesize, rng, terminalNodeFunc,
+                      strategy);
+        auto [nodes, values] = tree.deserialize(in);
+        tree.from_nodes(std::move(nodes), std::move(values));
+        trees.push_back(tree);
+      }
+    }
+  }
+  [[maybe_unused]] void save(const std::string &filename) const {
+    std::ofstream out(filename + ".bin", std::ios::binary);
+    if (out) serialize(out);
+    out.close();
+  }
+  [[maybe_unused]] void load(const std::string &filename) {
+    std::ifstream in(filename + ".bin", std::ios::binary);
+    if (in) deserialize(in);
+    in.close();
+  }
+  [[maybe_unused]] void save(std::ofstream& out) const {
+    if (out) serialize(out);
+  }
+  [[maybe_unused]] void load(std::ifstream& in) {
+    if (in) deserialize(in);
+  }
 private:
   const size_t maxDepth, minNodesize;
   RNG& rng;

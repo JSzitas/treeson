@@ -66,7 +66,6 @@ int main() {
   //tree.print_tree_structure();
   tree.print_terminal_node_values();
 
-
   std::cout << "Trying prediction" << std::endl;
   const auto& predictions = tree.predict(data);
   std::cout << "Prediction successful" << std::endl;
@@ -82,7 +81,7 @@ int main() {
     std::cout << "|\n";
   }
   std::cout << std::endl;
-
+  rng.seed(22); // NOLINT(*-msc51-cpp)
   treeson::RandomForest<resultFunc, std::mt19937, strat,
                         32, scalar_t, int> forest(4, 1, rng, res_functor, strat_obj);
   forest.fit(data, size_t(10), std::vector<size_t>{}, false, size_t(0));
@@ -100,6 +99,80 @@ int main() {
       std::cout << "|\n";
     }
   }
+  std::cout << "Saving tree" << std::endl;
+  tree.save("tree_save_test");
+  std::cout << "Loading tree" << std::endl;
+  tree.load("tree_save_test");
+  std::cout << "Running prediction again" << std::endl;
+
+  std::cout << "Trying prediction" << std::endl;
+  const auto& predictions2 = tree.predict(data);
+  std::cout << "Prediction successful" << std::endl;
+  // Print predictions
+  std::cout << "Predictions match?: " << std::endl;
+  const auto expanded_1 =   predictions.expand_result();
+  const auto expanded_2 = predictions2.expand_result();
+  std::cout << "Sizes?: " << (expanded_1.size() == expanded_2.size()) << std::endl;
+  size_t pred = 0;
+  for(; pred < expanded_1.size(); pred++) {
+    for (const auto index : expanded_1[pred]) {
+      std::cout << index << " ";
+    }
+    std::cout << " | ";
+    for (const auto index : expanded_2[pred]) {
+      std::cout << index << " ";
+    }
+    std::cout << "\n";
+  }
+  std::cout << "Saving forest" << std::endl;
+  forest.save("forest_save_test");
+  std::cout << "Loading forest" << std::endl;
+  forest.load("forest_save_test");
+
+
+  const auto& pred_from_file = forest.
+                               predict(data, "forest_save_test");
+  for(tree_id = 0; tree_id < predictions_forest.size(); tree_id++) {
+    std::cout << "Tree: " << tree_id << std::endl;
+    pred_id = 0;
+    const auto& original = predictions_forest[tree_id].expand_result();
+    const auto& deserialized = pred_from_file[tree_id].expand_result();
+    for(size_t k =0; k < deserialized.size(); k++) {
+      std::cout << "Prediction id: "<< pred_id++ << "; ";
+      for (const auto &index : original[k]) {
+        std::cout << index << " ";
+      }
+      std::cout << " | ";
+      for (const auto &index : deserialized[k]) {
+        std::cout << index << " ";
+      }
+      std::cout << "\n";
+    }
+  }
+  rng.seed(22); // NOLINT(*-msc51-cpp)
+  // fitting a forest but only saving it, rather than materializing
+  treeson::RandomForest<resultFunc, std::mt19937, strat,
+                        32, scalar_t, int> forest2(4, 1, rng, res_functor, strat_obj);
+  forest.fit(data, size_t(10), std::vector<size_t>{}, "forest_test", false, size_t(0));
+  const auto pred_from_file2 = forest2.predict(data, "forest_test");
+  for(tree_id = 0; tree_id < predictions_forest.size(); tree_id++) {
+    std::cout << "Tree: " << tree_id << std::endl;
+    pred_id = 0;
+    const auto& original = pred_from_file[tree_id].expand_result();
+    const auto& deserialized = pred_from_file2[tree_id].expand_result();
+    for(size_t k =0; k < deserialized.size(); k++) {
+      std::cout << "Prediction id: "<< pred_id++ << "; ";
+      for (const auto &index : original[k]) {
+        std::cout << index << " ";
+      }
+      std::cout << " | ";
+      for (const auto &index : deserialized[k]) {
+        std::cout << index << " ";
+      }
+      std::cout << "\n";
+    }
+  }
+
 
   return 0;
 }

@@ -33,12 +33,12 @@ int main() {
       load_parquet_data<int, scalar_t>("test_data/train.parquet");
       //CSVLoader<int, scalar_t>::load_data<true, false>("test_data/dr_train.csv", 10000);
   std::cout << "Done." << std::endl;
-  /*std::cout << "Loading test: ";
+  std::cout << "Loading test: ";
   auto test_data =
-      //load_parquet_data<int, scalar_t>("test_data/train.parquet");
-      CSVLoader<int, scalar_t>::load_data<true, false>("test_data/dr_test.csv", 10000);
+      load_parquet_data<int, scalar_t>("test_data/test.parquet");
+      //CSVLoader<int, scalar_t>::load_data<true, false>("test_data/dr_test.csv", 10000);
   std::cout << "Done." << std::endl;
-   */
+
   struct WelfordMultiMean{
     std::vector<scalar_t> means;
     explicit WelfordMultiMean(const size_t n_targets, const bool init_index = false)
@@ -159,6 +159,7 @@ int main() {
 
   return 0;
   */
+  /*
   for(const auto& n_tree: {200}){//100, 500, 1'000, 2'000, 5'000, 10'000, 50'000, 100'000}){
     struct MultiMeanWelfordAcc{
       WelfordMultiMean acc;
@@ -194,8 +195,8 @@ int main() {
                                                     {}, {},
                                                     importances
                                                     );
-  }
-   /*
+  }*/
+
 
    struct MultitargetMeanAccumulator{
     std::vector<WelfordMultiMean> result;
@@ -213,13 +214,25 @@ int main() {
         }
       }
     }
-    [[nodiscard]] auto results() const {
+    [[nodiscard]] auto flat_results() const {
       std::vector<scalar_t> res;
       const size_t n_targets = result.front().means.size()-1;
       const size_t n_preds = result.size();
       for(size_t j = 0; j < n_targets; j++) {
         for(size_t k = 0; k < n_preds; k++) {
           res.push_back(result[k].means[j]);
+        }
+      }
+      return res;
+    }
+    [[nodiscard]] auto results() const {
+      const size_t n_targets = result.front().means.size()-1;
+      const size_t n_preds = result.size();
+      std::vector<std::vector<scalar_t>> res(n_preds, std::vector<scalar_t>(n_targets));
+        for(size_t k = 0; k < n_preds; k++) {
+          auto& temp = res[k];
+          for(size_t j = 0; j < n_targets; j++) {
+          temp[j] = result[k].means[j];
         }
       }
       return res;
@@ -233,7 +246,8 @@ int main() {
       return res;
     }
    };
-  for(const size_t n_tree : {100, 500, 1'000, 2'000, 5'000, 10'000, 50'000, 100'000}){
+  for(const size_t n_tree : {//100, 500, 1'000, 2'000, 5'000, 10'000, 50'000,
+            1'000}){
     {
       MultitargetMeanAccumulator acc(
           4, std::get<std::vector<scalar_t>>(test_data[0]).size());
@@ -245,8 +259,6 @@ int main() {
       std::cout << "Computing metrics: "<< std::endl;
       for(const auto target: targets) {
         const auto res = acc.one_result(target);
-        //treeson::utils::print_vector(res);
-        //treeson::utils::print_vector(std::get<std::vector<scalar_t>>(test_data[target]));
 
         std::cout << "Target: " << target+1 << std::endl;
         std::cout << " | Spearman: " <<
@@ -262,7 +274,11 @@ int main() {
                                       res, std::get<std::vector<scalar_t>>(test_data[target])
                                           ) << std::endl;
       }
+      std::cout << "Writing predictions" << std::endl;
+      CSVWriter<int, scalar_t>::write_data<true, false>("predictions.csv",
+                                                         {"target_w", "target_r", "target_g", "target_b"}, {},
+                                                         acc.results());
     }
-  }*/
+  }
   return 0;
 }
