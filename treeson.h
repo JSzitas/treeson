@@ -1472,28 +1472,35 @@ public:
     }
     return results;
   }
-  /*
   [[nodiscard]] void predict(
       Accumulator& accumulator,
       const std::vector<FeatureData> &samples,
       const std::string &model_file) const noexcept {
-    const size_t n = trees.size();
-    std::vector<containers::TreePredictionResult<ResultType>> results(n);
+  std::ifstream in(model_file + ".bin", std::ios::binary);
+    size_t n;
+    in.read(reinterpret_cast<char*>(&n), sizeof(n));
 #ifndef NO_MULTITHREAD
-    threading::ThreadPool pool;
-    threading::SharedResourceWrapper<Accumulator> accumulator_(accumulator);
+      threading::ThreadPool pool;
+      // shared resource to access the file
+      threading::SharedResourceWrapper<std::ifstream> in_(in);
+      threading::SharedResourceWrapper<Accumulator> acc_(acc);
 #endif
-    for (size_t i = 0; i < trees.size(); ++i) {
+      for (size_t i = 0; i < n; i++) {
 #ifdef NO_MULTITHREAD
-      results[i] = trees[i].predict(samples);
+        TreeType tree(maxDepth, minNodesize, rng, terminalNodeFunc, strategy);
+        auto [nodes, values] = tree.deserialize(in);
+        tree.from_nodes(std::move(nodes),std::move(values));
+        acc(tree.predict(samples));
 #else
-      pool.enqueue([this, &results, &samples, &i] {
-        results[i] = trees[i].predict(samples);
-      });
+        pool.enqueue([this, &results_, &samples, &i] {
+          TreeType tree(maxDepth, minNodesize, rng, terminalNodeFunc, strategy);
+          auto [nodes, values] = tree.deserialize(in_);
+          acc_(tree.from_nodes(std::move(nodes),
+                               std::move(values)).predict(samples));
+        });
 #endif
-    }
+      }
   }
-   */
   template<typename Accumulator>
   [[maybe_unused]] void memoryless_predict(
       Accumulator& accumulator,
