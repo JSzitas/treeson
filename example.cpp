@@ -84,8 +84,8 @@ int main() {
   rng.seed(22); // NOLINT(*-msc51-cpp)
   treeson::RandomForest<resultFunc, std::mt19937, strat,
                         32, scalar_t, int> forest(4, 1, rng, res_functor, strat_obj);
-  forest.fit(data, size_t(10), std::vector<size_t>{}, false, size_t(0));
-  const auto& predictions_forest = forest.predict(data);
+  forest.fit(data, size_t(10), std::vector<size_t>{}, false, size_t(0), size_t(1));
+  const auto& predictions_forest = forest.predict(data, size_t(1));
 
   size_t tree_id = 0;
   for(const auto& pred: predictions_forest) {
@@ -129,9 +129,8 @@ int main() {
   std::cout << "Loading forest" << std::endl;
   forest.load("forest_save_test");
 
-
   const auto& pred_from_file = forest.
-                               predict(data, "forest_save_test");
+                               predict(data, std::string("forest_save_test"), size_t(1));
   for(tree_id = 0; tree_id < predictions_forest.size(); tree_id++) {
     std::cout << "Tree: " << tree_id << std::endl;
     pred_id = 0;
@@ -153,8 +152,10 @@ int main() {
   // fitting a forest but only saving it, rather than materializing
   treeson::RandomForest<resultFunc, std::mt19937, strat,
                         32, scalar_t, int> forest2(4, 1, rng, res_functor, strat_obj);
-  forest.fit(data, size_t(10), std::vector<size_t>{}, "forest_test", false, size_t(0));
-  const auto pred_from_file2 = forest2.predict(data, "forest_test");
+  forest2.fit(data, size_t(10), std::vector<size_t>{}, std::string("forest_test"),
+             false, size_t(0), size_t(1));
+  const auto pred_from_file2 = forest2.predict(
+      data, std::string("forest_test"), size_t(1));
   for(tree_id = 0; tree_id < predictions_forest.size(); tree_id++) {
     std::cout << "Tree: " << tree_id << std::endl;
     pred_id = 0;

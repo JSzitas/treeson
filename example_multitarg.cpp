@@ -30,12 +30,12 @@ int main() {
   std::mt19937 rng(22); // NOLINT(*-msc51-cpp)
   std::cout << "Loading train: ";
   auto train_data =
-      load_parquet_data<int, scalar_t>("test_data/train.parquet");
+      load_parquet_data<int, scalar_t>("../test_data/train.parquet");
       //CSVLoader<int, scalar_t>::load_data<true, false>("test_data/dr_train.csv", 10000);
   std::cout << "Done." << std::endl;
   std::cout << "Loading test: ";
   auto test_data =
-      load_parquet_data<int, scalar_t>("test_data/test.parquet");
+      load_parquet_data<int, scalar_t>("../test_data/test.parquet");
       //CSVLoader<int, scalar_t>::load_data<true, false>("test_data/dr_test.csv", 10000);
   std::cout << "Done." << std::endl;
 
@@ -115,7 +115,8 @@ int main() {
   treeson::RandomForest<decltype(res_functor), std::mt19937, strat,
                         0, scalar_t, int> forest(6, 12, rng, res_functor, strat_obj);
 
-  struct MeanSquaredError {
+  struct
+      [[maybe_unused]] MeanSquaredError {
     std::vector<size_t> targets = {0,1,2,3};
     std::vector<scalar_t> operator()(const std::vector<scalar_t>& vals, const DataType &samples,
                       const std::vector<size_t>& indices,
@@ -214,7 +215,7 @@ int main() {
         }
       }
     }
-    [[nodiscard]] auto flat_results() const {
+    [[maybe_unused]] [[nodiscard]] auto flat_results() const {
       std::vector<scalar_t> res;
       const size_t n_targets = result.front().means.size()-1;
       const size_t n_preds = result.size();
@@ -247,7 +248,7 @@ int main() {
     }
    };
   for(const size_t n_tree : {//100, 500, 1'000, 2'000, 5'000, 10'000, 50'000,
-            1'000}){
+            10'000}){
     {
       MultitargetMeanAccumulator acc(
           4, std::get<std::vector<scalar_t>>(test_data[0]).size());

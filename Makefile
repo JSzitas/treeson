@@ -1,16 +1,16 @@
 all: example
 
 example:
-	clang++ -std=c++17 -O0 -ggdb -Wall -DNO_MULTITHREAD example.cpp -o example.o; ./example.o
+	clang++ -std=c++17 -O0 -ggdb -Wall example.cpp -o example.o; ./example.o
 
 m_example:
 	clang++ -std=c++17 -I/usr/local/include -L/usr/local/lib -larrow -lparquet -O2  -ggdb -Wall example_multitarg.cpp -o example.o; ./example.o
 
 m_example_n:
-	clang++ -std=c++17 -I/usr/local/include -L/usr/local/lib -larrow -lparquet -O2 -ggdb -Wall -DNO_MULTITHREAD example_multitarg.cpp -o example.o; ./example.o
+	clang++ -std=c++17 -I/usr/local/include -L/usr/local/lib -larrow -lparquet -O2 -ggdb -Wall example_multitarg.cpp -o example.o; ./example.o
 
 profile:
-	clang++ -std=c++17 -O0 -g -Wall -DNO_MULTITHREAD example_multitarg.cpp -o profile.o; ./profile.o
+	clang++ -std=c++17 -O0 -g -Wall example_multitarg.cpp -o profile.o; ./profile.o
 
 profile_m:
 	clang++ -std=c++17 -O0 -g -Wall example_multitarg.cpp -o profile_m.o; ./profile_m.o

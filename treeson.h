@@ -350,6 +350,73 @@ struct [[maybe_unused]] SharedResourceWrapper{
     std::lock_guard<std::mutex> lock(m_mutex);
     x.serialize(resource);
   }
+  // same for deserialization
+  template<typename T> auto deserialize(T& x) {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    return x.deserialize(resource);
+  }
+};
+size_t thread_heuristic(const size_t num_threads = 0) {
+  const size_t max_threads = std::thread::hardware_concurrency();
+  auto used_threads = (num_threads == 0 || (num_threads > max_threads)) ? max_threads : num_threads;
+  return used_threads;
+}
+}
+namespace memory{
+template<typename... Ts>
+class [[maybe_unused]] MemoryPool {
+public:
+  MemoryPool() = default;
+
+  template<typename T>
+  void emplace_back(T&& resource) {
+    pool.push_back(std::forward<T>(resource));
+    availabilities.push_back(true);
+  }
+  template<typename T>
+  struct ResourceHandle {
+    MemoryPool& pool;
+    T& resource;
+    std::size_t index;
+    ResourceHandle(MemoryPool& pool, T& resource, std::size_t index)
+        : pool(pool), resource(resource), index(index) {}
+    ~ResourceHandle() { pool.release(index); }
+    T* operator->() { return &resource; }
+    T& operator*() { return resource; }
+  };
+  template<typename T> [[maybe_unused]] ResourceHandle<T> get() {
+    std::unique_lock<std::mutex> lock(poolMutex);
+    poolCondVar.wait(lock, [this]() { return has_available_resource<T>(); });
+    for (std::size_t i = 0; i < pool.size(); ++i) {
+      if (!availabilities[i]) continue;
+      if (std::holds_alternative<T>(pool[i])) {
+        availabilities[i] = false;
+        return ResourceHandle<T>(*this, std::get<T>(pool[i]), i);
+      }
+    }
+  }
+
+private:
+  template<typename T>
+  [[nodiscard]] bool has_available_resource() const {
+    for (std::size_t i = 0; i < pool.size(); ++i) {
+      if (availabilities[i] && std::holds_alternative<T>(pool[i])) {
+        return true;
+      }
+    }
+    return false;
+  }
+  void release(std::size_t index) {
+    {
+      std::lock_guard<std::mutex> lock(poolMutex);
+      availabilities[index] = true;
+    }
+    poolCondVar.notify_all();
+  }
+  std::vector<std::variant<Ts...>> pool;
+  std::vector<bool> availabilities;
+  std::mutex poolMutex;
+  std::condition_variable poolCondVar;
 };
 }
 namespace containers {
@@ -382,10 +449,10 @@ template <typename integral_t>
 class FixedCategoricalSet<0, integral_t> {
 public:
   FixedCategoricalSet() = default;
-  [[nodiscard]] bool contains(const size_t value) const noexcept {return false;}
-  void add(const integral_t value) noexcept {}
-  void serialize(std::ostream& os) const {}
-  void deserialize(std::istream& is) {}
+  [[nodiscard]] bool contains(const size_t) const noexcept {return false;}
+  void add(const integral_t) noexcept {}
+  void serialize(std::ostream&) const {}
+  void deserialize(std::istream&) {}
 };
 template <typename integral_t>
 class FixedCategoricalSet<1, integral_t> {
@@ -917,7 +984,7 @@ class RandomTree {
   ResultF &terminalNodeFunc;
   std::vector<ResultType> terminal_values;
   SplitStrategy &split_strategy;
-
+  bool preallocated = false;
 public:
   [[maybe_unused]] RandomTree<ResultF, RNG, SplitStrategy, MaxCategoricalSet,
                               scalar_t>(const size_t maxDepth,
@@ -933,63 +1000,36 @@ public:
   [[maybe_unused]] void
   fit(const std::vector<FeatureData> &data, std::vector<size_t> indices,
       const std::vector<size_t> &nosplit_features) noexcept {
-    // Create a list of available features, excluding nosplit_features
-    std::vector<size_t> available_features;
-    for (size_t i = 0; i < data.size(); ++i) {
-      if (std::find(nosplit_features.begin(), nosplit_features.end(), i) ==
-          nosplit_features.end()) {
-        available_features.push_back(i);
-      }
+    if(preallocated) {
+      nodes[0].left = 0;
+      refit_impl(data, indices, nosplit_features);
+    } else {
+      fit_impl(data, indices, nosplit_features);
     }
-    buildTree(data, indices, available_features, 0, 0, indices.size());
   }
   [[maybe_unused]] void fit(const std::vector<FeatureData> &data,
                             std::vector<size_t> indices,
                             std::vector<size_t> &&nosplit_features) noexcept {
-    // Create a list of available features, excluding nosplit_features
-    std::vector<size_t> available_features;
-    for (size_t i = 0; i < data.size(); ++i) {
-      if (std::find(nosplit_features.begin(), nosplit_features.end(), i) ==
-          nosplit_features.end()) {
-        available_features.push_back(i);
-      }
+    if(preallocated) {
+      nodes[0].left = 0;
+      refit_impl(data, indices, nosplit_features);
+    } else {
+      fit_impl(data, indices, nosplit_features);
     }
-    buildTree(data, indices, available_features, 0, 0, indices.size());
   }
-
   template <const bool FlattenResults = false>
   [[nodiscard]] auto predict(const std::vector<FeatureData> &samples,
                              std::vector<size_t> &indices) const noexcept {
-    if constexpr (FlattenResults) {
-      std::vector<utils::value_type_t<ResultType>> flat_result;
-      predictSamples<true>(0, samples, indices, 0, indices.size(), flat_result);
-      return flat_result;
-    } else {
-      containers::TreePredictionResult<ResultType> result;
-      predictSamples<false>(0, samples, indices, 0, indices.size(), result);
-      // N.B.: indices get shuffled, so they should only be assigned
-      // once, here, AFTER being shuffled
-      result.indices = indices;
-      return result;
-    }
+    return predict_impl<FlattenResults>(samples, indices);
   }
   template <const bool FlattenResults = false>
   [[nodiscard]] auto predict(const std::vector<FeatureData> &samples)
       const noexcept {
-    std::vector<size_t> indices = treeson::utils::make_index_range(std::visit(
-        [](auto &&arg) -> size_t { return arg.size(); }, samples[0]));
-    if constexpr (FlattenResults) {
-      std::vector<utils::value_type_t<ResultType>> flat_result;
-      predictSamples<true>(0, samples, indices, 0, indices.size(), flat_result);
-      return flat_result;
-    } else {
-      containers::TreePredictionResult<ResultType> result;
-      result.indices = indices;
-      predictSamples<false>(0, samples, indices, 0, indices.size(), result);
-      return result;
-    }
+    std::vector<size_t> indices = treeson::utils::make_index_range(
+        utils::size(samples[0]));
+    return predict_impl<FlattenResults>(samples, indices);
   }
-  [[maybe_unused]] std::set<size_t> used_features() const {
+  [[maybe_unused]] [[nodiscard]] std::set<size_t> used_features() const {
     std::set<size_t> features;
     for (const auto& node : nodes) {
         features.insert(node.featureIndex);
@@ -1012,11 +1052,12 @@ public:
       std::cout << std::endl;
     }
   }
-  bool is_uninformative() const noexcept {
+  [[nodiscard]] bool is_uninformative() const noexcept {
     // consists of only root
     return nodes.size() == 1;
   }
-  template<typename Metric, typename Reducer = treeson::reducers::defaultImportanceReducer<scalar_t>>
+  template<typename Metric,
+           typename Reducer = treeson::reducers::defaultImportanceReducer<scalar_t>>
   [[maybe_unused]] auto eval_oob(
       const std::vector<FeatureData> &oob_data,
       std::vector<size_t> &indices) {
@@ -1029,7 +1070,8 @@ public:
         0, oob_data, indices, 0, indices.size(), results, 0);
     return Reducer()(results);
   }
-  template<typename Metric, typename Reducer = treeson::reducers::defaultImportanceReducer<scalar_t>>
+  template<typename Metric,
+           typename Reducer = treeson::reducers::defaultImportanceReducer<scalar_t>>
   [[maybe_unused]] auto eval_oob(
       const std::vector<FeatureData> &oob_data,
       std::vector<size_t> &indices,
@@ -1045,10 +1087,10 @@ public:
   }
   void from_nodes(
       std::vector<containers::Node<scalar_t, integral_t,
-                                   MaxCategoricalSet>> &&nodes,
-      std::vector<ResultType>&& terminal_values){
-      this->nodes = nodes;
-      this->terminal_values = terminal_values;
+                                   MaxCategoricalSet>> && internal_nodes,
+      std::vector<ResultType>&& terminal_node_values){
+      this->nodes = internal_nodes;
+      this->terminal_values = terminal_node_values;
     }
     [[maybe_unused]] void save(const std::string &filename) {
       std::ofstream out(filename + ".bin", std::ios::binary);
@@ -1076,12 +1118,15 @@ public:
       for (const auto& value : terminal_values) {
         serializers::serialize(value, os);
       }
+      serializers::serialize(preallocated, os);
     }
-    std::pair<std::vector<containers::Node<scalar_t, integral_t, MaxCategoricalSet>>,
-              std::vector<ResultType>> deserialize(std::istream& is) const {
+    std::pair<std::vector<containers::Node<
+        scalar_t, integral_t, MaxCategoricalSet>>,
+              std::vector<ResultType>> deserialize(std::istream& is) {
       size_t size;
       is.read(reinterpret_cast<char*>(&size), sizeof(size));
-      std::vector<containers::Node<scalar_t, integral_t, MaxCategoricalSet>> deserialized_nodes(size);
+      std::vector<containers::Node<scalar_t, integral_t, MaxCategoricalSet>>
+          deserialized_nodes(size);
       for (auto& node : deserialized_nodes) {
         node.deserialize(is);
       }
@@ -1090,9 +1135,63 @@ public:
       for (auto& value : deserialized_terminal_values) {
         serializers::deserialize(value, is);
       }
-      return std::make_pair(std::move(deserialized_nodes), std::move(deserialized_terminal_values));
+      serializers::deserialize(preallocated, is);
+      return std::make_pair(std::move(deserialized_nodes),
+                            std::move(deserialized_terminal_values));
+    }
+    [[maybe_unused]] void preallocate() {
+      const size_t size = std::pow(2, maxDepth + 1) - 1;
+      nodes = std::vector<containers::Node<
+          scalar_t, integral_t, MaxCategoricalSet>>(size);
+      terminal_values = std::vector<ResultType>(size);
+      preallocated = true;
     }
   private:
+  template<typename T> auto fit_impl(
+      const std::vector<FeatureData> &data,
+      std::vector<size_t> indices,
+      T&& nosplit_features) noexcept{
+    std::vector<size_t> available_features;
+    for (size_t i = 0; i < data.size(); ++i) {
+      if (std::find(nosplit_features.begin(), nosplit_features.end(), i) ==
+          nosplit_features.end()) {
+        available_features.push_back(i);
+      }
+    }
+    buildTree(data, indices, available_features, 0, 0, indices.size());
+  }
+  template<typename T> auto refit_impl(
+      const std::vector<FeatureData> &data,
+      std::vector<size_t> indices,
+      T&& nosplit_features) noexcept{
+    std::vector<size_t> available_features;
+    for (size_t i = 0; i < data.size(); ++i) {
+      if (std::find(nosplit_features.begin(), nosplit_features.end(), i) ==
+          nosplit_features.end()) {
+        available_features.push_back(i);
+      }
+    }
+    size_t nodeIndex = 0, terminal_index = 0;
+    rebuildTree(data, indices, available_features, 0, 0, indices.size(),
+                0, nodeIndex, terminal_index);
+  }
+  template <const bool FlattenResults = false>
+  [[nodiscard]] auto predict_impl(
+      const std::vector<FeatureData> &samples,
+      std::vector<size_t> &indices) const noexcept {
+    if constexpr (FlattenResults) {
+      std::vector<utils::value_type_t<ResultType>> flat_result;
+      predictSamples<true>(0, samples, indices, 0, indices.size(), flat_result);
+      return flat_result;
+    } else {
+      containers::TreePredictionResult<ResultType> result;
+      predictSamples<false>(0, samples, indices, 0, indices.size(), result);
+      // N.B.: indices get shuffled, so they should only be assigned
+      // once, here, AFTER being shuffled
+      result.indices = indices;
+      return result;
+    }
+  }
   void buildTree(const std::vector<FeatureData> &data,
                  std::vector<size_t> &indices,
                  const std::vector<size_t> &available_features,
@@ -1119,6 +1218,35 @@ public:
                 depth + 1);
       buildTree(data, indices, available_features, nodeIndex, mid, end,
                 depth + 1);
+    }
+  }
+  void rebuildTree(const std::vector<FeatureData> &data,
+                 std::vector<size_t> &indices,
+                 const std::vector<size_t> &available_features,
+                 size_t parentIndex, size_t start, size_t end,
+                 size_t depth, size_t& nodeIndex,
+                 size_t& terminal_index) noexcept {
+    if (nodes[parentIndex].left == 0) {
+      nodes[parentIndex].left = nodeIndex; // Left child
+    } else {
+      nodes[parentIndex].right = nodeIndex; // Right child
+    }
+    split_strategy.select_split(data, indices, available_features, start, end,
+                                nodes[nodeIndex], rng);
+    size_t mid = reorder_indices(data, nodes[nodeIndex], start, end, indices);
+    // if a child node would be too small
+    if (((mid - start) <= minNodesize) || ((end - mid) <= minNodesize) ||
+        depth >= maxDepth) {
+      // get rid of last node since it was actually invalid
+      terminal_values[terminal_index++] = terminalNodeFunc(indices, start, end, data);
+      nodes[nodeIndex].assign_terminal(terminal_index - 1);
+    } else {
+      const size_t node_ = nodeIndex;
+      nodeIndex++;
+      rebuildTree(data, indices, available_features, node_, start, mid,
+                  depth+1, nodeIndex, terminal_index);
+      rebuildTree(data, indices, available_features, node_, mid, end,
+                  depth+1, nodeIndex, terminal_index);
     }
   }
   template<typename Metric, const bool exclude_feature = false> [[nodiscard]]
@@ -1275,7 +1403,8 @@ public:
            const size_t n_tree,
            const std::vector<size_t> &nosplit_features,
            const bool resample = true,
-           const size_t sample_size = 0) {
+           const size_t sample_size = 0,
+           const size_t num_threads = 0) {
     size_t bootstrap_size =
         sample_size > 0
             ? sample_size
@@ -1287,68 +1416,21 @@ public:
                 << std::endl;
       return;
     }
-#ifndef NO_MULTITHREAD
-    threading::SharedResourceWrapper<std::vector<TreeType>> trees_;
-#endif
-    // N.B.: Outer scope forces thread pool to finish before we do anything
-    {
-#ifndef NO_MULTITHREAD
-      threading::ThreadPool pool;
-      // required for thread safety
-#endif
-      for (size_t i = 0; i < n_tree; ++i) {
-#ifdef NO_MULTITHREAD
-        [this, &data, &nosplit_features, resample_, bootstrap_size]() {
-#else
-        const size_t seed = rng();
-        pool.enqueue([this, &data, &trees_, &nosplit_features, resample_, seed,
-                      bootstrap_size] {
-#endif
-          std::vector<size_t> indices =
-              utils::make_index_range(utils::size(data[0]));
-          // custom random number generator for this tree
-#ifndef NO_MULTITHREAD
-          RNG rng_(seed);
-#else
-          auto& rng_ = rng;
-#endif
-          TreeType tree(maxDepth, minNodesize, rng_, terminalNodeFunc,
-                        strategy);
-          if (resample_) {
-            tree.fit(
-                data,
-                treeson::utils::bootstrap_sample(indices, bootstrap_size, rng_),
-                nosplit_features);
-          } else {
-            tree.fit(data, indices, nosplit_features);
-          }
-          /* N.B.: for thread safety this is invoked via a proxy; be not afraid,
-             but do not try to modify the implementation unless you know
-             what is going on */
-#ifndef NO_MULTITHREAD
-          trees_->push_back(tree);
-#else
-          trees.push_back(tree);
-#endif
-        }
-#ifdef NO_MULTITHREAD
-        ();
-#else
-        );
-#endif
-      }
+    const size_t actual_num_threads = threading::thread_heuristic(num_threads);
+    if(actual_num_threads == 1) {
+      fit_st(data, n_tree, nosplit_features, resample_, bootstrap_size);
+      return;
     }
-#ifndef NO_MULTITHREAD
-    // move to actual trees
-    trees = std::move(trees_.resource);
-#endif
+    fit_mt(data, n_tree, nosplit_features, resample_, bootstrap_size,
+           actual_num_threads);
   }
   [[maybe_unused]] void fit(const std::vector<FeatureData> &data,
                             const size_t n_tree,
                             const std::vector<size_t> &nosplit_features,
                             const std::string &file,
                             const bool resample = true,
-                            const size_t sample_size = 0) {
+                            const size_t sample_size = 0,
+                            const size_t num_threads = 0) {
     size_t bootstrap_size =
         sample_size > 0
             ? sample_size
@@ -1360,146 +1442,56 @@ public:
                 << std::endl;
       return;
     }
+    const size_t actual_num_threads = threading::thread_heuristic(num_threads);
     std::ofstream out(file + ".bin", std::ios::binary);
     out.write(reinterpret_cast<const char*>(&n_tree), sizeof(n_tree));
-#ifndef NO_MULTITHREAD
-    threading::SharedResourceWrapper<std::ofstream> out_(out);
-#endif
-    // N.B.: Outer scope forces thread pool to finish before we do anything
-    {
-#ifndef NO_MULTITHREAD
-      threading::ThreadPool pool;
-      // required for thread safety
-#endif
-      for (size_t i = 0; i < n_tree; ++i) {
-#ifdef NO_MULTITHREAD
-        [this, &data, &nosplit_features, resample_, bootstrap_size, &out]() {
-#else
-        const size_t seed = rng();
-        pool.enqueue([this, &data, &trees_, &nosplit_features, resample_, seed,
-                      bootstrap_size, &out_] {
-#endif
-          std::vector<size_t> indices =
-              utils::make_index_range(utils::size(data[0]));
-          // custom random number generator for this tree
-#ifndef NO_MULTITHREAD
-          RNG rng_(seed);
-#else
-          auto& rng_ = rng;
-#endif
-          TreeType tree(maxDepth, minNodesize, rng_, terminalNodeFunc,
-                        strategy);
-          if (resample_) {
-            tree.fit(
-                data,
-                treeson::utils::bootstrap_sample(indices, bootstrap_size, rng_),
-                nosplit_features);
-          } else {
-            tree.fit(data, indices, nosplit_features);
-          }
-#ifndef NO_MULTITHREAD
-          out_.serialize(tree);
-#else
-          tree.serialize(out);
-#endif
-        }
-#ifdef NO_MULTITHREAD
-        ();
-#else
-        );
-#endif
-      }
+    if(actual_num_threads == 1) {
+      fit_to_file_st(data, n_tree, nosplit_features, out, resample_,
+                     bootstrap_size);
+      return;
     }
+    fit_to_file_mt(data, n_tree, nosplit_features, out, resample_,
+                   bootstrap_size, actual_num_threads);
   }
-  [[nodiscard]] std::vector<containers::TreePredictionResult<ResultType>> predict(
-      const std::vector<FeatureData> &samples) const noexcept {
-    const size_t n = trees.size();
-    std::vector<containers::TreePredictionResult<ResultType>> results(n);
-    {
-#ifndef NO_MULTITHREAD
-      threading::ThreadPool pool;
-      threading::SharedResourceWrapper<
-          std::vector<containers::TreePredictionResult<ResultType>>>
-          results_(results);
-#endif
-      for (size_t i = 0; i < trees.size(); ++i) {
-#ifdef NO_MULTITHREAD
-        results[i] = trees[i].predict(samples);
-#else
-        pool.enqueue([this, &results_, &samples, &i] {
-          results_[i] = trees[i].predict(samples);
-        });
-#endif
-      }
+  [[nodiscard]] std::vector<containers::TreePredictionResult<ResultType>>
+      predict(const std::vector<FeatureData> &samples,
+              const size_t num_threads) const noexcept {
+    const size_t actual_num_threads = threading::thread_heuristic(num_threads);
+    if(actual_num_threads == 1) {
+      return predict_st(samples);
     }
-#ifndef NO_MULTITHREAD
-    results = std:move(results_);
-#endif
-    return results;
+    return predict_mt(samples, actual_num_threads);
   }
   [[maybe_unused]] [[nodiscard]]
   std::vector<containers::TreePredictionResult<ResultType>> predict(
     const std::vector<FeatureData> &samples,
-    const std::string &model_file) const noexcept {
+    const std::string &model_file,
+    const size_t num_threads) const noexcept {
     std::ifstream in(model_file + ".bin", std::ios::binary);
     size_t n;
     in.read(reinterpret_cast<char*>(&n), sizeof(n));
-    std::vector<containers::TreePredictionResult<ResultType>> results(n);
-    {
-#ifndef NO_MULTITHREAD
-      threading::ThreadPool pool;
-      // shared resource to access the file
-      threading::SharedResourceWrapper<std::ifstream> in_(in);
-      threading::SharedResourceWrapper<
-          std::vector<containers::TreePredictionResult<ResultType>>
-          > results_(results);
-#endif
-      for (size_t i = 0; i < n; i++) {
-#ifdef NO_MULTITHREAD
-        TreeType tree(maxDepth, minNodesize, rng, terminalNodeFunc, strategy);
-        auto [nodes, values] = tree.deserialize(in);
-        tree.from_nodes(std::move(nodes),std::move(values));
-        results[i] = tree.predict(samples);
-#else
-        pool.enqueue([this, &results_, &samples, &i] {
-          TreeType tree(maxDepth, minNodesize, rng, terminalNodeFunc, strategy);
-          auto [nodes, values] = tree.deserialize(in_);
-          results_[i] = tree.from_nodes(std::move(nodes),
-                                        std::move(values)).predict(samples);
-        });
-#endif
-      }
+    const size_t actual_num_threads = threading::thread_heuristic(num_threads);
+    if(actual_num_threads == 1) {
+      return predict_from_file_st(samples, in, n);
     }
-    return results;
+    return predict_from_file_mt(samples, in, n, actual_num_threads);
   }
-  [[nodiscard]] void predict(
+  template<typename Accumulator>
+  void predict(
       Accumulator& accumulator,
       const std::vector<FeatureData> &samples,
-      const std::string &model_file) const noexcept {
-  std::ifstream in(model_file + ".bin", std::ios::binary);
+      const std::string &model_file,
+      const size_t num_threads = 0) const noexcept {
+    std::ifstream in(model_file + ".bin", std::ios::binary);
     size_t n;
     in.read(reinterpret_cast<char*>(&n), sizeof(n));
-#ifndef NO_MULTITHREAD
-      threading::ThreadPool pool;
-      // shared resource to access the file
-      threading::SharedResourceWrapper<std::ifstream> in_(in);
-      threading::SharedResourceWrapper<Accumulator> acc_(acc);
-#endif
-      for (size_t i = 0; i < n; i++) {
-#ifdef NO_MULTITHREAD
-        TreeType tree(maxDepth, minNodesize, rng, terminalNodeFunc, strategy);
-        auto [nodes, values] = tree.deserialize(in);
-        tree.from_nodes(std::move(nodes),std::move(values));
-        acc(tree.predict(samples));
-#else
-        pool.enqueue([this, &results_, &samples, &i] {
-          TreeType tree(maxDepth, minNodesize, rng, terminalNodeFunc, strategy);
-          auto [nodes, values] = tree.deserialize(in_);
-          acc_(tree.from_nodes(std::move(nodes),
-                               std::move(values)).predict(samples));
-        });
-#endif
-      }
+    const size_t actual_num_threads = threading::thread_heuristic(num_threads);
+    if(actual_num_threads == 1) {
+      predict_from_file_acc_st(accumulator, samples, in, n);
+      return;
+    }
+    return predict_from_file_acc_mt(
+        accumulator, samples, in, n, actual_num_threads);
   }
   template<typename Accumulator>
   [[maybe_unused]] void memoryless_predict(
@@ -1509,7 +1501,8 @@ public:
       const size_t n_tree,
       const std::vector<size_t> &nosplit_features,
       const bool resample = true,
-      const size_t sample_size = 0) const noexcept {
+      const size_t sample_size = 0,
+      const size_t num_threads = 0) const noexcept {
     size_t bootstrap_size = sample_size > 0 ? sample_size :
       std::visit([](auto&& arg) -> size_t { return arg.size(); }, train_data[0]);
     const bool resample_ = resample && sample_size > 0;
@@ -1518,70 +1511,15 @@ public:
           "but provided 'sample_size = 0'. Quitting, respecify." << std::endl;
       return;
     }
-    // do the lazy thing following L'Ecuyer
-    // see 'Random Numbers for Parallel Computers: Requirements and Methods, With Emphasis on GPUs'
-    // Pierre L’Ecuyer, David Munger, Boris Oreshkin, Richard Simard, p.15
-    // 'A single RNG with a “random” seed for each stream.'
-    // link: https://www.iro.umontreal.ca/~lecuyer/myftp/papers/parallel-rng-imacs.pdf
-#ifndef NO_MULTITHREAD
-    // ensure no data races
-    threading::SharedResourceWrapper<Accumulator> accumulator_(accumulator);
-#else
-    auto& accumulator_ = accumulator;
-#endif
-    {
-#ifndef NO_MULTITHREAD
-      threading::ThreadPool pool;
-#endif
-      for (size_t i = 0; i < n_tree; ++i) {
-#ifdef NO_MULTITHREAD
-        [this, &train_data, &predict_data, &accumulator, &nosplit_features,
-         resample_, bootstrap_size]() {
-#else
-        const size_t seed = rng();
-        pool.enqueue([this, &train_data, &predict_data, &accumulator_,
-                      &nosplit_features, resample_, seed, bootstrap_size] {
-#endif
-          std::vector<size_t> indices(std::visit(
-              [](auto &&arg) -> size_t { return arg.size(); }, train_data[0]));
-          std::iota(indices.begin(), indices.end(), 0);
-#ifdef NO_MULTITHREAD
-          auto &rng_ = rng;
-#else
-          RNG rng_(seed);
-#endif
-          TreeType tree(maxDepth, minNodesize, rng_, terminalNodeFunc,
-                        strategy);
-          if (resample_) {
-            tree.fit(
-                train_data,
-                treeson::utils::bootstrap_sample(indices, bootstrap_size, rng_),
-                nosplit_features);
-          } else {
-            tree.fit(train_data, indices, nosplit_features);
-          }
-          if (tree.is_uninformative()) {
-            // make it clear that this tree does not count
-            return;
-          }
-          std::vector<size_t> pred_indices =
-              utils::make_index_range(utils::size(predict_data[0]));
-          auto prediction_result =
-              tree.template predict<utils::is_invocable_with<
-                  Accumulator,
-                  std::vector<utils::value_type_t<ResultType>>>::value>(
-                  predict_data, pred_indices);
-          accumulator_(prediction_result);
-        }
-#ifdef NO_MULTITHREAD
-        ();
-#else
-        );
-#endif
-      }
+    const size_t actual_num_threads = threading::thread_heuristic(num_threads);
+    if(actual_num_threads == 1) {
+      memoryless_predict_st(accumulator, train_data, predict_data, n_tree,
+          nosplit_features, resample_, bootstrap_size);
+      return;
     }
-    // move to accumulator that was passed in
-    accumulator = std::move(accumulator_.resource);
+    memoryless_predict_mt(accumulator, train_data, predict_data, n_tree,
+                          nosplit_features, resample_, bootstrap_size,
+                          actual_num_threads);
   }
   [[maybe_unused]] void prune() {
     trees.erase(
@@ -1598,101 +1536,19 @@ public:
       const size_t n_tree,
       const std::vector<size_t> &nosplit_features,
       const bool oob = true,
-      const size_t sample_size = 0) {
+      const size_t sample_size = 0,
+      const size_t num_threads = 0) {
     size_t bootstrap_size = sample_size > 0 ? sample_size :
                                             utils::size(train_data[0]);
-    // we do not allow resampling as such here because it complicates the interface
-    // and leaves us in an equal 'in-bag error' situation as if sample size was just set
-    // to total size.
-    std::vector<size_t> indices = utils::make_index_range(utils::size(train_data[0]));
-    /* N.B.: outer scope forces thread-pool to finish - important!!!
-     without this we can proceed onto the importance stuff BEFORE we have
-     any results, so this MUST be closed off.*/
-#ifndef NO_MULTITHREAD
-    std::vector<threading::SharedResourceWrapper<Accumulator>>
-        accumulators(train_data.size() + 1);
-#else
-    std::vector<Accumulator> accumulators(train_data.size() + 1);
-#endif
-    /* N.B.: outer scope forces thread-pool to finish - important!!!
- without this we can proceed onto the importance stuff BEFORE we have
- any results, so this MUST be closed off.*/
-    {
-#ifndef NO_MULTITHREAD
-      threading::ThreadPool pool;
-#endif
-      for (size_t i = 0; i < n_tree; ++i) {
-#ifdef NO_MULTITHREAD
-        [this, &train_data, &indices, &accumulators, &nosplit_features,
-         bootstrap_size, oob]() {
-#else
-        const auto seed = rng();
-        pool.enqueue([this, &train_data, &accumulators, &indices,
-                      &nosplit_features, seed, bootstrap_size, oob] {
-#endif
-#ifdef NO_MULTITHREAD
-          auto &rng_ = rng;
-#else
-          RNG rng_(seed);
-#endif
-          TreeType tree(maxDepth, minNodesize, rng_, terminalNodeFunc,
-                        strategy);
-          std::vector<size_t> train_indices, test_indices;
-          if (oob) {
-            std::tie(train_indices, test_indices) =
-                treeson::utils::bootstrap_two_samples(indices, bootstrap_size,
-                                                      rng_);
-          } else {
-            train_indices =
-                treeson::utils::bootstrap_sample(indices, bootstrap_size, rng_);
-            test_indices = train_indices;
-          }
-          tree.fit(train_data, train_indices, nosplit_features);
-          if (tree.is_uninformative()) {
-            // make it clear that this tree does not count
-            return;
-          }
-          auto used_features = tree.used_features();
-          // compute baseline - update first accumulator
-          accumulators[0](
-              tree.template eval_oob<Metric>(train_data, test_indices));
-          // update all other accumulators
-          for (const auto feature : used_features) {
-            accumulators[feature + 1](tree.template eval_oob<Metric>(
-                train_data, test_indices, feature));
-          }
-        }
-#ifdef NO_MULTITHREAD
-        ();
-#else
-        );
-#endif
-      }
+    const size_t actual_num_threads = threading::thread_heuristic(num_threads);
+    if(actual_num_threads == 1) {
+      feature_importance_omit_st<Accumulator, Metric, Importance>(
+          train_data, n_tree, nosplit_features, oob, bootstrap_size);
+      return;
     }
-    // convert from accumulator values to importances
-    Importance importance_;
-#ifndef NO_MULTITHREAD
-    // whatever the invocation over two accumulators produces :)
-    std::vector<decltype(importance_(accumulators.front().resource.result(),
-                                     accumulators.front().resource.result())
-                             )> importances(accumulators.size()-1);
-    const auto baseline_results = accumulators.front().resource.result();
-    for (size_t feature_i = 0; feature_i < accumulators.size()-1; feature_i++) {
-      importances[feature_i] = importance_(
-          baseline_results, accumulators[feature_i+1].resource.result());
-    }
-#else
-    // same as above, but sans .resource everywhere
-    std::vector<decltype(importance_(accumulators.front().result(),
-                                     accumulators.front().result())
-                             )> importances(accumulators.size()-1);
-    const auto baseline_results = accumulators.front().result();
-    for (size_t feature_i = 0; feature_i < accumulators.size()-1; feature_i++) {
-      importances[feature_i] = importance_(
-          baseline_results, accumulators[feature_i+1].result());
-    }
-#endif
-    return importances;
+    feature_importance_omit_mt<Accumulator, Metric, Importance>(
+        train_data, n_tree, nosplit_features, oob, bootstrap_size,
+        actual_num_threads);
   }
   [[maybe_unused]] void print() {
     for(const auto& tree : trees)
@@ -1740,6 +1596,437 @@ public:
     if (in) deserialize(in);
   }
 private:
+  void fit_st(const std::vector<FeatureData> &data,
+              const size_t n_tree,
+              const std::vector<size_t> &nosplit_features,
+              const bool resample,
+              const size_t bootstrap_size) {
+    for (size_t i = 0; i < n_tree; ++i) {
+      std::vector<size_t> indices =
+          utils::make_index_range(utils::size(data[0]));
+      TreeType tree(maxDepth, minNodesize, rng, terminalNodeFunc,
+                    strategy);
+      if (resample) {
+        tree.fit(
+            data,
+            treeson::utils::bootstrap_sample(indices, bootstrap_size, rng),
+            nosplit_features);
+      } else {
+        tree.fit(data, indices, nosplit_features);
+      }
+      trees.push_back(tree);
+    }
+  }
+  void fit_mt(const std::vector<FeatureData> &data,
+      const size_t n_tree,
+      const std::vector<size_t> &nosplit_features,
+      const bool resample,
+      const size_t bootstrap_size,
+      const size_t actual_num_threads) {
+    threading::SharedResourceWrapper<std::vector<TreeType>> trees_;
+    // N.B.: Outer scope forces thread pool to finish before we do anything
+    {
+      threading::ThreadPool pool(actual_num_threads);
+      for (size_t i = 0; i < n_tree; ++i) {
+        const size_t seed = rng();
+        pool.enqueue([this, &data, &trees_, &nosplit_features, resample, seed,
+                      bootstrap_size] {
+          std::vector<size_t> indices =
+              utils::make_index_range(utils::size(data[0]));
+          // custom random number generator for this tree
+          RNG rng_(seed);
+          TreeType tree(maxDepth, minNodesize, rng_, terminalNodeFunc,
+                        strategy);
+          if (resample) {
+            tree.fit(
+                data,
+                treeson::utils::bootstrap_sample(indices, bootstrap_size, rng_),
+                nosplit_features);
+          } else {
+            tree.fit(data, indices, nosplit_features);
+          }
+          /* N.B.: for thread safety this is invoked via a proxy; be not afraid,
+             but do not try to modify the implementation unless you know
+             what is going on */
+          trees_->push_back(tree);
+        });
+      }
+    }
+    trees = std::move(trees_.resource);
+  }
+  void fit_to_file_st(const std::vector<FeatureData> &data,
+                      const size_t n_tree,
+                      const std::vector<size_t> &nosplit_features,
+                      std::ofstream& out,
+                      const bool resample,
+                      const size_t bootstrap_size) {
+    for (size_t i = 0; i < n_tree; ++i) {
+        std::vector<size_t> indices =
+            utils::make_index_range(utils::size(data[0]));
+        TreeType tree(maxDepth, minNodesize, rng, terminalNodeFunc,
+                      strategy);
+        if (resample) {
+          tree.fit(
+              data,
+              treeson::utils::bootstrap_sample(indices, bootstrap_size, rng),
+              nosplit_features);
+        } else {
+          tree.fit(data, indices, nosplit_features);
+        }
+        tree.serialize(out);
+      }
+  }
+  void fit_to_file_mt(const std::vector<FeatureData> &data,
+                      const size_t n_tree,
+                      const std::vector<size_t> &nosplit_features,
+                      std::ofstream& out,
+                      const bool resample,
+                      const size_t bootstrap_size,
+                      const size_t actual_num_threads) {
+    threading::SharedResourceWrapper<std::ofstream> out_(std::move(out));
+    {
+      threading::ThreadPool pool(actual_num_threads);
+      // required for thread safety
+      for (size_t i = 0; i < n_tree; ++i) {
+        const size_t seed = rng();
+        pool.enqueue([this, &data, &nosplit_features, resample, seed,
+                      bootstrap_size, &out_] {
+          std::vector<size_t> indices =
+            utils::make_index_range(utils::size(data[0]));
+          // custom random number generator for this tree
+          RNG rng_(seed);
+          TreeType tree(maxDepth, minNodesize, rng_, terminalNodeFunc,
+                        strategy);
+          if (resample) {
+            tree.fit(
+                data,
+                treeson::utils::bootstrap_sample(indices, bootstrap_size, rng_),
+                nosplit_features);
+          } else {
+            tree.fit(data, indices, nosplit_features);
+          }
+          out_.serialize(tree);
+        });
+      }
+    }
+  }
+  [[nodiscard]] std::vector<containers::TreePredictionResult<ResultType>>
+  predict_st(const std::vector<FeatureData> &samples) const noexcept {
+    const size_t n = trees.size();
+    std::vector<containers::TreePredictionResult<ResultType>> results(n);
+    for (size_t i = 0; i < trees.size(); ++i) {
+      results[i] = trees[i].predict(samples);
+    }
+    return results;
+  }
+  [[nodiscard]] std::vector<containers::TreePredictionResult<ResultType>>
+  predict_mt(const std::vector<FeatureData> &samples,
+             const size_t actual_num_threads = 1) const noexcept {
+    const size_t n = trees.size();
+    std::vector<containers::TreePredictionResult<ResultType>> results(n);
+    threading::SharedResourceWrapper<
+        std::vector<containers::TreePredictionResult<ResultType>>> results_(results);
+    {
+      threading::ThreadPool pool(actual_num_threads);
+      for (size_t i = 0; i < trees.size(); ++i) {
+        pool.enqueue([this, &results_, &samples, i] {
+          results_[i] = trees[i].predict(samples);
+        });
+      }
+    }
+    return results_.resource;
+  }
+  [[maybe_unused]] [[nodiscard]]
+std::vector<containers::TreePredictionResult<ResultType>> predict_from_file_st(
+    const std::vector<FeatureData> &samples,
+      std::ifstream& model_stream,
+      const size_t n) const noexcept {
+  std::vector<containers::TreePredictionResult<ResultType>> results(n);
+  for (size_t i = 0; i < n; i++) {
+    TreeType tree(maxDepth, minNodesize, rng, terminalNodeFunc, strategy);
+    auto [nodes, values] = tree.deserialize(model_stream);
+    tree.from_nodes(std::move(nodes),std::move(values));
+    results[i] = tree.predict(samples);
+  }
+  return results;
+}
+std::vector<containers::TreePredictionResult<ResultType>> predict_from_file_mt(
+    const std::vector<FeatureData> &samples,
+    std::ifstream& model_stream,
+    const size_t n,
+    const size_t actual_num_threads) const noexcept {
+    // shared resource to access the file
+    std::vector<containers::TreePredictionResult<ResultType>> results(n);
+    threading::SharedResourceWrapper<
+        std::vector<containers::TreePredictionResult<ResultType>>
+        > results_(std::move(results));
+    threading::SharedResourceWrapper<std::ifstream> in_(std::move(model_stream));
+    {
+      threading::ThreadPool pool(actual_num_threads);
+      for (size_t i = 0; i < n; i++) {
+        pool.enqueue([this, &results_, &samples, &in_, i] {
+          TreeType tree(maxDepth, minNodesize, rng, terminalNodeFunc, strategy);
+          auto [nodes, values] = in_.deserialize(tree);
+          tree.from_nodes(std::move(nodes), std::move(values));
+          results_[i] = tree.predict(samples);
+        });
+      }
+    }
+    return results_.resource;
+  }
+  template<typename Accumulator>
+  void predict_from_file_acc_st(
+      Accumulator& accumulator,
+      const std::vector<FeatureData> &samples,
+      std::ifstream & in,
+      const size_t n) const noexcept {
+    for (size_t i = 0; i < n; i++) {
+      TreeType tree(maxDepth, minNodesize, rng, terminalNodeFunc, strategy);
+      auto [nodes, values] = tree.deserialize(in);
+      tree.from_nodes(std::move(nodes),std::move(values));
+      accumulator(tree.predict(samples));
+    }
+  }
+  template<typename Accumulator>
+  void predict_from_file_acc_mt(
+      Accumulator& accumulator,
+      const std::vector<FeatureData> &samples,
+      std::ifstream & in,
+      const size_t n,
+      const size_t actual_num_threads) const noexcept {
+    threading::ThreadPool pool(actual_num_threads);
+    // shared resource to access the file
+    threading::SharedResourceWrapper<std::ifstream> in_(std::move(in));
+    threading::SharedResourceWrapper<Accumulator> accumulator_(accumulator);
+    for (size_t i = 0; i < n; i++) {
+      pool.enqueue([this, &accumulator_, &samples, &in_] {
+        TreeType tree(maxDepth, minNodesize, rng, terminalNodeFunc, strategy);
+        auto [nodes, values] = tree.deserialize(in_);
+        acc_(tree.from_nodes(std::move(nodes),
+                             std::move(values)).predict(samples));
+      });
+    }
+  }
+  template<typename Accumulator>
+  [[maybe_unused]] void memoryless_predict_st(
+      Accumulator& accumulator,
+      const std::vector<FeatureData> &train_data,
+      const std::vector<FeatureData> &predict_data,
+      const size_t n_tree,
+      const std::vector<size_t> &nosplit_features,
+      const bool resample,
+      const size_t bootstrap_size) const noexcept {
+    for (size_t i = 0; i < n_tree; ++i) {
+      std::vector<size_t> indices(utils::size(train_data[0]));
+      std::iota(indices.begin(), indices.end(), 0);
+      TreeType tree(maxDepth, minNodesize, rng, terminalNodeFunc, strategy);
+      if (resample) {
+        tree.fit(
+            train_data,
+            treeson::utils::bootstrap_sample(indices, bootstrap_size, rng),
+            nosplit_features);
+      } else {
+        tree.fit(train_data, indices, nosplit_features);
+      }
+      if (tree.is_uninformative()) {
+        // make it clear that this tree does not count
+        return;
+      }
+      std::vector<size_t> pred_indices =
+          utils::make_index_range(utils::size(predict_data[0]));
+      auto prediction_result =
+          tree.template predict<utils::is_invocable_with<
+              Accumulator,
+              std::vector<utils::value_type_t<ResultType>>>::value>(
+                predict_data, pred_indices);
+      accumulator(prediction_result);
+    }
+  }
+  template<typename Accumulator>
+  [[maybe_unused]] void memoryless_predict_mt(
+      Accumulator& accumulator,
+      const std::vector<FeatureData> &train_data,
+      const std::vector<FeatureData> &predict_data,
+      const size_t n_tree,
+      const std::vector<size_t> &nosplit_features,
+      const bool resample,
+      const size_t bootstrap_size,
+      const size_t actual_num_threads) const noexcept {
+    // do the lazy thing following L'Ecuyer
+    // see 'Random Numbers for Parallel Computers: Requirements and Methods, With Emphasis on GPUs'
+    // Pierre L’Ecuyer, David Munger, Boris Oreshkin, Richard Simard, p.15
+    // 'A single RNG with a “random” seed for each stream.'
+    // link: https://www.iro.umontreal.ca/~lecuyer/myftp/papers/parallel-rng-imacs.pdf
+    // ensure no data races
+    threading::SharedResourceWrapper<Accumulator> accumulator_(accumulator);
+    {
+      threading::ThreadPool pool(actual_num_threads);
+      for (size_t i = 0; i < n_tree; ++i) {
+        const size_t seed = rng();
+        pool.enqueue([this, &train_data, &predict_data, &accumulator_,
+                      &nosplit_features, resample, seed, bootstrap_size] {
+          std::vector<size_t> indices(utils::size(train_data[0]));
+          std::iota(indices.begin(), indices.end(), 0);
+          RNG rng_(seed);
+          TreeType tree(maxDepth, minNodesize, rng_, terminalNodeFunc,
+                        strategy);
+          if (resample) {
+            tree.fit(
+                train_data,
+                treeson::utils::bootstrap_sample(indices, bootstrap_size, rng_),
+                nosplit_features);
+          } else {
+            tree.fit(train_data, indices, nosplit_features);
+          }
+          if (tree.is_uninformative()) {
+            // make it clear that this tree does not count
+            return;
+          }
+          std::vector<size_t> pred_indices =
+              utils::make_index_range(utils::size(predict_data[0]));
+          auto prediction_result =
+              tree.template predict<utils::is_invocable_with<
+                  Accumulator,
+                  std::vector<utils::value_type_t<ResultType>>>::value>(
+                  predict_data, pred_indices);
+          accumulator_(prediction_result);
+        });
+      }
+    }
+    // move to accumulator that was passed in
+    accumulator = std::move(accumulator_.resource);
+  }
+  // Feature importance method
+  template<typename Accumulator, typename Metric, typename Importance>
+  [[maybe_unused]] auto feature_importance_omit_st(
+      const std::vector<FeatureData> &train_data,
+      const size_t n_tree,
+      const std::vector<size_t> &nosplit_features,
+      const bool oob,
+      const size_t bootstrap_size) {
+    // we do not allow resampling as such here because it complicates the interface
+    // and leaves us in an equal 'in-bag error' situation as if sample size was just set
+    // to total size.
+    std::vector<size_t> indices = utils::make_index_range(utils::size(train_data[0]));
+    /* N.B.: outer scope forces thread-pool to finish - important!!!
+     without this we can proceed onto the importance stuff BEFORE we have
+     any results, so this MUST be closed off.*/
+    std::vector<Accumulator> accumulators(train_data.size() + 1);
+    /* N.B.: outer scope forces thread-pool to finish - important!!!
+    without this we can proceed onto the importance stuff BEFORE we have
+    any results, so this MUST be closed off.*/
+    {
+      for (size_t i = 0; i < n_tree; ++i) {
+          TreeType tree(maxDepth, minNodesize, rng, terminalNodeFunc,
+                        strategy);
+          std::vector<size_t> train_indices, test_indices;
+          if (oob) {
+            std::tie(train_indices, test_indices) =
+                treeson::utils::bootstrap_two_samples(indices, bootstrap_size,
+                                                      rng);
+          } else {
+            train_indices =
+                treeson::utils::bootstrap_sample(indices, bootstrap_size, rng);
+            test_indices = train_indices;
+          }
+          tree.fit(train_data, train_indices, nosplit_features);
+          if (tree.is_uninformative()) {
+            // make it clear that this tree does not count
+            return;
+          }
+          auto used_features = tree.used_features();
+          // compute baseline - update first accumulator
+          accumulators[0](
+              tree.template eval_oob<Metric>(train_data, test_indices));
+          // update all other accumulators
+          for (const auto feature : used_features) {
+            accumulators[feature + 1](tree.template eval_oob<Metric>(
+                train_data, test_indices, feature));
+          }
+        }
+      }
+    // convert from accumulator values to importances
+    Importance importance_;
+    std::vector<decltype(importance_(accumulators.front().result(),
+                                     accumulators.front().result())
+                             )> importances(accumulators.size()-1);
+    const auto baseline_results = accumulators.front().result();
+    for (size_t feature_i = 0; feature_i < accumulators.size()-1; feature_i++) {
+      importances[feature_i] = importance_(
+          baseline_results, accumulators[feature_i+1].result());
+    }
+    return importances;
+  }
+  // Feature importance method
+  template<typename Accumulator, typename Metric, typename Importance>
+  [[maybe_unused]] auto feature_importance_omit_mt(
+      const std::vector<FeatureData> &train_data,
+      const size_t n_tree,
+      const std::vector<size_t> &nosplit_features,
+      const bool oob = true,
+      const size_t bootstrap_size = 0,
+      const size_t actual_num_threads = 0) {
+    // we do not allow resampling as such here because it complicates the interface
+    // and leaves us in an equal 'in-bag error' situation as if sample size was just set
+    // to total size.
+    std::vector<size_t> indices = utils::make_index_range(utils::size(train_data[0]));
+    /* N.B.: outer scope forces thread-pool to finish - important!!!
+     without this we can proceed onto the importance stuff BEFORE we have
+     any results, so this MUST be closed off.*/
+    std::vector<threading::SharedResourceWrapper<Accumulator>>
+        accumulators(train_data.size() + 1);
+    /* N.B.: outer scope forces thread-pool to finish - important!!!
+ without this we can proceed onto the importance stuff BEFORE we have
+ any results, so this MUST be closed off.*/
+    {
+      threading::ThreadPool pool(actual_num_threads);
+      for (size_t i = 0; i < n_tree; ++i) {
+        const auto seed = rng();
+        pool.enqueue([this, &train_data, &accumulators, &indices,
+                      &nosplit_features, seed, bootstrap_size, oob] {
+          RNG rng_(seed);
+          TreeType tree(maxDepth, minNodesize, rng_, terminalNodeFunc,
+                        strategy);
+          std::vector<size_t> train_indices, test_indices;
+          if (oob) {
+            std::tie(train_indices, test_indices) =
+                treeson::utils::bootstrap_two_samples(indices, bootstrap_size,
+                                                      rng_);
+          } else {
+            train_indices =
+                treeson::utils::bootstrap_sample(indices, bootstrap_size, rng_);
+            test_indices = train_indices;
+          }
+          tree.fit(train_data, train_indices, nosplit_features);
+          if (tree.is_uninformative()) {
+            // make it clear that this tree does not count
+            return;
+          }
+          auto used_features = tree.used_features();
+          // compute baseline - update first accumulator
+          accumulators[0](
+              tree.template eval_oob<Metric>(train_data, test_indices));
+          // update all other accumulators
+          for (const auto feature : used_features) {
+            accumulators[feature + 1](tree.template eval_oob<Metric>(
+                train_data, test_indices, feature));
+          }
+        });
+      }
+    }
+    // convert from accumulator values to importances
+    Importance importance_;
+    // whatever the invocation over two accumulators produces :)
+    std::vector<decltype(importance_(accumulators.front().resource.result(),
+                                     accumulators.front().resource.result())
+                             )> importances(accumulators.size()-1);
+    const auto baseline_results = accumulators.front().resource.result();
+    for (size_t feature_i = 0; feature_i < accumulators.size()-1; feature_i++) {
+      importances[feature_i] = importance_(
+          baseline_results, accumulators[feature_i+1].resource.result());
+    }
+    return importances;
+  }
   const size_t maxDepth, minNodesize;
   RNG& rng;
   ResultF& terminalNodeFunc;
@@ -1755,7 +2042,7 @@ public:
   using FeatureData = typename TreeType::FeatureData;
   using ResultType = typename TreeType::ResultType;
 
-  GradientBoosting(size_t n_estimators, double learning_rate)
+  Treeson(size_t n_estimators, double learning_rate)
       : n_estimators(n_estimators), learning_rate(learning_rate) {}
 
   void fit(const std::vector<FeatureData>& data, const std::vector<ResultType>& targets) {
