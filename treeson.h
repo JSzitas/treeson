@@ -472,7 +472,7 @@ template<typename T, const auto tag> struct [[maybe_unused]] Tagged {
     return item.size();
   }
   // Convert to underlying type to make this object behave like the wrapped type
-  operator T&() {
+  explicit operator T&() {
     return item;
   }
 };
@@ -1438,6 +1438,139 @@ public:
     return mid;
   }
 };
+/* TODO(JSzitas): this doesnt actually work right now
+template <typename scalar_t, typename integral_t, const size_t MaxCategoricalSet>
+class HoeffdingTree {
+public:
+  struct RegressionStatistics {
+    scalar_t mean = 0.0, m2 = 0.0;
+    size_t count = 1;
+    void add(scalar_t value) {
+      scalar_t delta = value - mean;
+      mean += delta / count;
+      scalar_t delta2 = value - mean;
+      m2 += delta * delta2;
+      count++;
+    }
+    scalar_t variance() const {
+      return count > 1 ? m2 / (count - 1) : 0.0;
+    }
+  };
+  [[maybe_unused]] HoeffdingTree(const scalar_t delta, const size_t max_samples_per_node)
+      : delta_(delta), max_samples_per_node_(max_samples_per_node),
+    nodes_(std::vector<containers::Node<scalar_t, integral_t, MaxCategoricalSet>>{}),
+    statistics_(std::vector<RegressionStatistics>{}) {}
+  void train(const std::vector<std::vector<scalar_t>>& data_stream) {
+    for (const auto& instance : data_stream) {
+      containers::Node<scalar_t, integral_t, MaxCategoricalSet>& current = nodes_.front();
+      // while not terminal
+      while (!current->is_leaf) {
+        if (instance[current.featureIndex] < std::get<scalar_t>(current.threshold)) {
+          current = nodes_[current.left];
+        } else {
+          current = nodes_[current.right];
+        }
+      }
+      scalar_t target = instance.back();  // Assuming target is the last element
+      update_statistics(current.terminal_index, target);
+      attempt_split(current);
+    }
+  }
+  scalar_t predict(const std::vector<scalar_t>& instance) {
+    containers::Node<scalar_t, integral_t, MaxCategoricalSet>* current = &nodes_.front();
+    while (!current->is_leaf) {
+      if (instance[current->split_feature] < std::get<scalar_t>(current->threshold)) {
+        current = &nodes_[current->left];
+      } else {
+        current = &nodes_[current->right];
+      }
+    }
+
+    // Return the mean of the terminal node's statistics
+    return statistics_[current->terminal_index].mean;
+  }
+private:
+
+  scalar_t compute_hoeffding_bound(scalar_t range, scalar_t confidence, int n) {
+    return sqrt((range * range * log(1.0 / confidence)) / (2.0 * n));
+  }
+  void update_statistics(size_t terminal_index, scalar_t target) {
+    auto& stats = statistics_[terminal_index];
+    stats.add(target);
+  }
+  void attempt_split(containers::Node<scalar_t, integral_t, MaxCategoricalSet>& node,
+                     const std::vector<std::vector<scalar_t>>& data_stream) {
+    auto& stats = statistics_[node.terminal_index];
+
+    // Check if we have enough samples to consider a split
+    if (stats.count >= max_samples_per_node_) {
+      scalar_t best_variance_reduction = 0.0;
+      size_t best_feature = std::numeric_limits<size_t>::max();
+      scalar_t best_split = 0.0;
+
+      for (size_t feature = 0; feature < data_stream[0].size() - 1; ++feature) {
+        // Assuming the last column is the target
+        // Sort instances by the current feature
+        std::vector<std::pair<scalar_t, scalar_t>> feature_target_pairs;
+        for (const auto& instance : data_stream) {
+          feature_target_pairs.emplace_back(instance[feature], instance.back());
+        }
+
+        std::sort(feature_target_pairs.begin(), feature_target_pairs.end());
+
+        // Initialize left and right statistics
+        RegressionStatistics left_stats, right_stats;
+        for (const auto& [feature_value, target_value] : feature_target_pairs) {
+          right_stats.add(target_value);
+        }
+
+        // Evaluate split points between consecutive feature values
+        for (size_t i = 0; i < feature_target_pairs.size() - 1; ++i) {
+          left_stats.add(feature_target_pairs[i].second);
+          right_stats.count--; // Decrement right count
+          right_stats.mean *= right_stats.count / (right_stats.count + 1);
+          scalar_t delta = feature_target_pairs[i].second - right_stats.mean;
+          right_stats.mean += delta / right_stats.count;
+          right_stats.m2 -= delta * (feature_target_pairs[i].second - right_stats.mean);
+
+          if (feature_target_pairs[i].first != feature_target_pairs[i + 1].first) {
+            // Compute variance reduction
+            scalar_t variance_reduction = stats.variance()
+                                        - ((left_stats.count / static_cast<scalar_t>(stats.count)) * left_stats.variance()
+                                           + (right_stats.count / static_cast<scalar_t>(stats.count)) * right_stats.variance());
+
+            // Check if this split is better
+            if (variance_reduction > best_variance_reduction) {
+              best_variance_reduction = variance_reduction;
+              best_feature = feature;
+              best_split = (feature_target_pairs[i].first + feature_target_pairs[i + 1].first) / 2.0;
+            }
+          }
+        }
+      }
+
+      // Use Hoeffding bound to decide whether to split
+      scalar_t epsilon = compute_hoeffding_bound(1.0, delta_, stats.count);
+      if (best_variance_reduction > epsilon) {
+        // Perform the split
+        containers::Node<scalar_t, integral_t, MaxCategoricalSet> left, right;
+        node.split_feature = best_feature;
+        node.threshold = best_split;
+        node.left = nodes_.size();
+        node.right = nodes_.size() + 1;
+        nodes_.push_back(left);
+        nodes_.push_back(right);
+        statistics_.emplace_back(RegressionStatistics());
+        statistics_.emplace_back(RegressionStatistics());
+      }
+    }
+  }
+  scalar_t delta_;
+  size_t max_samples_per_node_;
+  std::vector<containers::Node<scalar_t, integral_t, MaxCategoricalSet>> nodes_;
+  std::vector<RegressionStatistics> statistics_;
+};
+*/
 template <typename ResultF, typename RNG, typename SplitStrategy,
           const size_t MaxCategoricalSet = 32, typename scalar_t = double,
           typename integral_t = size_t>
@@ -1587,8 +1720,13 @@ public:
         trees.end()
     );
   }
+  enum ImportanceMethod{
+    Omit,
+    Contrast
+  };
   // Feature importance method
-  template<typename Accumulator, typename Metric, typename Importance>
+  template<typename Accumulator, typename Metric, typename Importance,
+           const ImportanceMethod Method = ImportanceMethod::Omit>
   [[maybe_unused]] auto feature_importance(
       const std::vector<FeatureData> &train_data,
       const size_t n_tree,
@@ -1600,13 +1738,26 @@ public:
                                             utils::size(train_data[0]);
     const size_t actual_num_threads = threading::thread_heuristic(num_threads);
     if(actual_num_threads == 1) {
-      feature_importance_omit_st<Accumulator, Metric, Importance>(
-          train_data, n_tree, nosplit_features, oob, bootstrap_size);
+      if constexpr(Method == ImportanceMethod::Omit) {
+        feature_importance_omit_st<Accumulator, Metric, Importance>(
+            train_data, n_tree, nosplit_features, oob, bootstrap_size);
+      }
+      if constexpr (Method == ImportanceMethod::Contrast) {
+        feature_importance_contrast_st<Accumulator, Metric, Importance>(
+            train_data, n_tree, nosplit_features, oob, bootstrap_size);
+      }
       return;
     }
-    feature_importance_omit_mt<Accumulator, Metric, Importance>(
-        train_data, n_tree, nosplit_features, oob, bootstrap_size,
-        actual_num_threads);
+    if constexpr(Method == ImportanceMethod::Omit) {
+      feature_importance_omit_mt<Accumulator, Metric, Importance>(
+          train_data, n_tree, nosplit_features, oob, bootstrap_size,
+          actual_num_threads);
+    }
+    if constexpr (Method == ImportanceMethod::Contrast) {
+      feature_importance_contrast_mt<Accumulator, Metric, Importance>(
+          train_data, n_tree, nosplit_features, oob, bootstrap_size,
+          actual_num_threads);
+    }
   }
   [[maybe_unused]] void print() {
     for(const auto& tree : trees)
@@ -1956,7 +2107,7 @@ std::vector<containers::TreePredictionResult<ResultType>> predict_from_file_mt(
     // move to accumulator that was passed in
     accumulator = std::move(accumulator_.resource);
   }
-  // Feature importance method
+  // Feature importance method - omission of variable by ignoring split
   template<typename Accumulator, typename Metric, typename Importance>
   [[maybe_unused]] auto feature_importance_omit_st(
       const std::vector<FeatureData> &train_data,
@@ -2017,7 +2168,6 @@ std::vector<containers::TreePredictionResult<ResultType>> predict_from_file_mt(
     }
     return importances;
   }
-  // Feature importance method
   template<typename Accumulator, typename Metric, typename Importance>
   [[maybe_unused]] auto feature_importance_omit_mt(
       const std::vector<FeatureData> &train_data,
@@ -2087,6 +2237,134 @@ std::vector<containers::TreePredictionResult<ResultType>> predict_from_file_mt(
     }
     return importances;
   }
+  // Feature importance method - importance vs global
+  template<typename Accumulator, typename Metric, typename Importance>
+  [[maybe_unused]] auto feature_importance_contrast_st(
+      const std::vector<FeatureData> &train_data,
+      const size_t n_tree,
+      const std::vector<size_t> &nosplit_features,
+      const bool oob,
+      const size_t bootstrap_size) {
+    // we do not allow resampling as such here because it complicates the interface
+    // and leaves us in an equal 'in-bag error' situation as if sample size was just set
+    // to total size.
+    std::vector<size_t> indices = utils::make_index_range(utils::size(train_data[0]));
+    /* N.B.: outer scope forces thread-pool to finish - important!!!
+     without this we can proceed onto the importance stuff BEFORE we have
+     any results, so this MUST be closed off.*/
+    std::vector<Accumulator> accumulators(train_data.size() + 1);
+    /* N.B.: outer scope forces thread-pool to finish - important!!!
+    without this we can proceed onto the importance stuff BEFORE we have
+    any results, so this MUST be closed off.*/
+    {
+      for (size_t i = 0; i < n_tree; ++i) {
+        TreeType tree(maxDepth, minNodesize, rng, terminalNodeFunc,
+                      strategy);
+        std::vector<size_t> train_indices, test_indices;
+        if (oob) {
+          std::tie(train_indices, test_indices) =
+              treeson::utils::bootstrap_two_samples(indices, bootstrap_size,
+                                                    rng);
+        } else {
+          train_indices =
+              treeson::utils::bootstrap_sample(indices, bootstrap_size, rng);
+          test_indices = train_indices;
+        }
+        tree.fit(train_data, train_indices, nosplit_features);
+        if (tree.is_uninformative()) {
+          // make it clear that this tree does not count
+          return;
+        }
+        auto used_features = tree.used_features();
+        const auto& res = tree.template eval_oob<Metric>(train_data, test_indices);
+        // compute baseline - update first accumulator
+        accumulators[0](res);
+        // update all other accumulators for which this is pertinent
+        for (const auto feature : used_features) {
+          accumulators[feature + 1](res);
+        }
+      }
+    }
+    // convert from accumulator values to importances
+    Importance importance_;
+    std::vector<decltype(importance_(accumulators.front().result(),
+                                     accumulators.front().result())
+                             )> importances(accumulators.size()-1);
+    const auto baseline_results = accumulators.front().result();
+    for (size_t feature_i = 0; feature_i < accumulators.size()-1; feature_i++) {
+      importances[feature_i] = importance_(
+          baseline_results, accumulators[feature_i+1].result());
+    }
+    return importances;
+  }
+  template<typename Accumulator, typename Metric, typename Importance>
+  [[maybe_unused]] auto feature_importance_contrast_mt(
+      const std::vector<FeatureData> &train_data,
+      const size_t n_tree,
+      const std::vector<size_t> &nosplit_features,
+      const bool oob = true,
+      const size_t bootstrap_size = 0,
+      const size_t actual_num_threads = 0) {
+    // we do not allow resampling as such here because it complicates the interface
+    // and leaves us in an equal 'in-bag error' situation as if sample size was just set
+    // to total size.
+    std::vector<size_t> indices = utils::make_index_range(utils::size(train_data[0]));
+    /* N.B.: outer scope forces thread-pool to finish - important!!!
+     without this we can proceed onto the importance stuff BEFORE we have
+     any results, so this MUST be closed off.*/
+    std::vector<threading::SharedResourceWrapper<Accumulator>>
+        accumulators(train_data.size() + 1);
+    /* N.B.: outer scope forces thread-pool to finish - important!!!
+ without this we can proceed onto the importance stuff BEFORE we have
+ any results, so this MUST be closed off.*/
+    {
+      threading::ThreadPool pool(actual_num_threads);
+      for (size_t i = 0; i < n_tree; ++i) {
+        const auto seed = rng();
+        pool.enqueue([this, &train_data, &accumulators, &indices,
+                      &nosplit_features, seed, bootstrap_size, oob] {
+          RNG rng_(seed);
+          TreeType tree(maxDepth, minNodesize, rng_, terminalNodeFunc,
+                        strategy);
+          std::vector<size_t> train_indices, test_indices;
+          if (oob) {
+            std::tie(train_indices, test_indices) =
+                treeson::utils::bootstrap_two_samples(indices, bootstrap_size,
+                                                      rng_);
+          } else {
+            train_indices =
+                treeson::utils::bootstrap_sample(indices, bootstrap_size, rng_);
+            test_indices = train_indices;
+          }
+          tree.fit(train_data, train_indices, nosplit_features);
+          if (tree.is_uninformative()) {
+            // make it clear that this tree does not count
+            return;
+          }
+          auto used_features = tree.used_features();
+          const auto& res = tree.template eval_oob<Metric>(train_data, test_indices);
+          // compute baseline - update first accumulator
+          accumulators[0](res);
+          // update all other accumulators
+          for (const auto feature : used_features) {
+            accumulators[feature + 1](res);
+          }
+        });
+      }
+    }
+    // convert from accumulator values to importances
+    Importance importance_;
+    // whatever the invocation over two accumulators produces :)
+    std::vector<decltype(importance_(accumulators.front().resource.result(),
+                                     accumulators.front().resource.result())
+                             )> importances(accumulators.size()-1);
+    const auto baseline_results = accumulators.front().resource.result();
+    for (size_t feature_i = 0; feature_i < accumulators.size()-1; feature_i++) {
+      importances[feature_i] = importance_(
+          baseline_results, accumulators[feature_i+1].resource.result());
+    }
+    return importances;
+  }
   /*
   memory::MemoryPool<>& initialize_pool(const size_t num_threads) {
     TreeType tree(maxDepth, minNodesize, rng, terminalNodeFunc,
@@ -2108,8 +2386,6 @@ std::vector<containers::TreePredictionResult<ResultType>> predict_from_file_mt(
     }
     auto used_features = tree.used_features();
   }*/
-
-
   const size_t maxDepth, minNodesize;
   RNG& rng;
   ResultF& terminalNodeFunc;
