@@ -387,13 +387,17 @@ public:
   template<typename T> [[maybe_unused]] ResourceHandle<T> get() {
     std::unique_lock<std::mutex> lock(poolMutex);
     poolCondVar.wait(lock, [this]() { return has_available_resource<T>(); });
-    for (std::size_t i = 0; i < pool.size(); ++i) {
+    std::size_t i = 0;
+    for (; i < pool.size(); ++i) {
       if (!availabilities[i]) continue;
       if (std::holds_alternative<T>(pool[i])) {
         availabilities[i] = false;
-        return ResourceHandle<T>(*this, std::get<T>(pool[i]), i);
+        break;
       }
     }
+    // this is outside the loop to prevent warnings about this function sometimes
+    // not returning non-void
+    return ResourceHandle<T>(*this, std::get<T>(pool[i]), i);
   }
 
 private:
@@ -417,6 +421,60 @@ private:
   std::vector<bool> availabilities;
   std::mutex poolMutex;
   std::condition_variable poolCondVar;
+};
+// used for making objects with ad-hoc tags
+template<typename T, const auto tag> struct [[maybe_unused]] Tagged {
+  T item;
+  [[maybe_unused]] explicit Tagged(T x) : item(std::move(x)){}
+  [[maybe_unused]] constexpr auto get_tag() const {
+    return tag;
+  }
+  template<typename... Args>
+  auto operator()(Args&&... args) -> decltype(resource(std::forward<Args>(args)...)) {
+    return item(std::forward<Args>(args)...);
+  }
+  template<typename Index>
+  auto operator[](Index&& index) -> decltype(item[std::forward<Index>(index)]) {
+    return item[std::forward<Index>(index)];
+  }
+  template<typename Index>
+  auto operator[](Index&& index) const -> decltype(item[std::forward<Index>(index)]) {
+    return item[std::forward<Index>(index)];
+  }
+  // Enable begin() if item has a begin()
+  template<typename U = T>
+  auto begin() -> decltype(std::declval<U&>().begin()) {
+    return item.begin();
+  }
+  // Enable begin() const if item has a const begin()
+  template<typename U = T>
+  auto begin() const -> decltype(std::declval<const U&>().begin()) {
+    return item.begin();
+  }
+  // Enable end() if item has an end()
+  template<typename U = T>
+  auto end() -> decltype(std::declval<U&>().end()) {
+    return item.end();
+  }
+  // Enable end() const if item has a const end()
+  template<typename U = T>
+  auto end() const -> decltype(std::declval<const U&>().end()) {
+    return item.end();
+  }
+  // Enable size() if item has a size()
+  template<typename U = T>
+  auto size() -> decltype(std::declval<U&>().size()) {
+    return item.size();
+  }
+  // Enable size() const if item has a const size()
+  template<typename U = T>
+  auto size() const -> decltype(std::declval<const U&>().size()) {
+    return item.size();
+  }
+  // Convert to underlying type to make this object behave like the wrapped type
+  operator T&() {
+    return item;
+  }
 };
 }
 namespace containers {
@@ -1816,9 +1874,9 @@ std::vector<containers::TreePredictionResult<ResultType>> predict_from_file_mt(
       const std::vector<size_t> &nosplit_features,
       const bool resample,
       const size_t bootstrap_size) const noexcept {
+    std::vector<size_t> indices(utils::size(train_data[0]));
+    std::iota(indices.begin(), indices.end(), 0);
     for (size_t i = 0; i < n_tree; ++i) {
-      std::vector<size_t> indices(utils::size(train_data[0]));
-      std::iota(indices.begin(), indices.end(), 0);
       TreeType tree(maxDepth, minNodesize, rng, terminalNodeFunc, strategy);
       if (resample) {
         tree.fit(
@@ -1858,15 +1916,15 @@ std::vector<containers::TreePredictionResult<ResultType>> predict_from_file_mt(
     // 'A single RNG with a “random” seed for each stream.'
     // link: https://www.iro.umontreal.ca/~lecuyer/myftp/papers/parallel-rng-imacs.pdf
     // ensure no data races
+    std::vector<size_t> indices(utils::size(train_data[0]));
+    std::iota(indices.begin(), indices.end(), 0);
     threading::SharedResourceWrapper<Accumulator> accumulator_(accumulator);
     {
       threading::ThreadPool pool(actual_num_threads);
       for (size_t i = 0; i < n_tree; ++i) {
         const size_t seed = rng();
-        pool.enqueue([this, &train_data, &predict_data, &accumulator_,
+        pool.enqueue([this, &train_data, &indices, &predict_data, &accumulator_,
                       &nosplit_features, resample, seed, bootstrap_size] {
-          std::vector<size_t> indices(utils::size(train_data[0]));
-          std::iota(indices.begin(), indices.end(), 0);
           RNG rng_(seed);
           TreeType tree(maxDepth, minNodesize, rng_, terminalNodeFunc,
                         strategy);
@@ -1876,7 +1934,9 @@ std::vector<containers::TreePredictionResult<ResultType>> predict_from_file_mt(
                 treeson::utils::bootstrap_sample(indices, bootstrap_size, rng_),
                 nosplit_features);
           } else {
-            tree.fit(train_data, indices, nosplit_features);
+            // take copy
+            std::vector<size_t> indices_ = indices;
+            tree.fit(train_data, indices_, nosplit_features);
           }
           if (tree.is_uninformative()) {
             // make it clear that this tree does not count
@@ -2027,6 +2087,29 @@ std::vector<containers::TreePredictionResult<ResultType>> predict_from_file_mt(
     }
     return importances;
   }
+  /*
+  memory::MemoryPool<>& initialize_pool(const size_t num_threads) {
+    TreeType tree(maxDepth, minNodesize, rng, terminalNodeFunc,
+                  strategy);
+    std::vector<size_t> train_indices, test_indices;
+    if (oob) {
+      std::tie(train_indices, test_indices) =
+          treeson::utils::bootstrap_two_samples(indices, bootstrap_size,
+                                                rng);
+    } else {
+      train_indices =
+          treeson::utils::bootstrap_sample(indices, bootstrap_size, rng);
+      test_indices = train_indices;
+    }
+    tree.fit(train_data, train_indices, nosplit_features);
+    if (tree.is_uninformative()) {
+      // make it clear that this tree does not count
+      return;
+    }
+    auto used_features = tree.used_features();
+  }*/
+
+
   const size_t maxDepth, minNodesize;
   RNG& rng;
   ResultF& terminalNodeFunc;
