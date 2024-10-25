@@ -51,8 +51,12 @@ template<typename T>
 [[maybe_unused]] static auto test([[maybe_unused]] T* p) ->
     decltype((*p)(std::declval<Arg>()), std::true_type{}) {
   return std::true_type{};
-};
-template <typename> static auto test(...) -> std::false_type {};
+}
+// Disable the specific warning
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wreturn-type"
+template <typename> static auto test(...) -> std::false_type {}
+#pragma GCC diagnostic pop
 [[maybe_unused]] static constexpr bool value = std::is_same_v<decltype(test<Accumulator>(0)), std::true_type>;
 };
 // Utility function to print elements of a container
@@ -222,6 +226,23 @@ std::vector<size_t> make_index_range(const size_t size) {
   std::vector<size_t> indices(size);
   std::iota(indices.begin(), indices.end(), 0);
   return indices;
+}
+template<typename T> [[maybe_unused]] void deduplicate(T& x) {
+  size_t n = x.size();
+  for (size_t i = 0; i < n; ++i) {
+    for (size_t j = i + 1; j < n; /* incremented in loop */) {
+      if (x[i] == x[j]) {
+        // Move the duplicate to the end
+        std::swap(x[j], x[n-1]);
+        // Reduce the size to exclude the duplicate
+        --n;
+      } else {
+        ++j; // only increment if no duplicate found
+      }
+    }
+  }
+  // Resize the vector to exclude the duplicates at the end
+  x.resize(n);
 }
 template<typename T> struct value_type_extractor;
 template<template<typename...> class Container, typename Element>
@@ -478,6 +499,134 @@ template<typename T, const auto tag> struct [[maybe_unused]] Tagged {
 };
 }
 namespace containers {
+// TODO(JSzitas): This is the solution to e.g. the max categorical set stuff
+// this will allow you to have safety via dynamic allocs and good performance
+// if the contract on max size is met. :) use this basically everywhere arrays
+// are used rn. eventually
+template<typename T, const size_t ShortSize>
+class [[maybe_unused]] ShortVector {
+private:
+  using arr = std::array<T, ShortSize>;
+  using vec = std::vector<T>;
+  std::variant<arr, vec> data{};
+  size_t current_size;
+  bool use_vector;
+
+  void to_vec() {
+    vec new_vector;
+    new_vector.reserve(current_size);
+    auto& array_data = std::get<arr>(data);
+    for (size_t i = 0; i < current_size; ++i) {
+      new_vector.push_back(std::move(array_data[i]));
+    }
+    data = std::move(new_vector);
+    use_vector = true;
+  }
+
+public:
+  ShortVector() : current_size(0), data(arr{}), use_vector(false) {}
+
+  T& operator[](const size_t index) {
+    if (use_vector) {
+      return std::get<vec>(data)[index];
+    }
+    return std::get<arr>(data)[index];
+  }
+
+  const T& operator[](const size_t index) const {
+    if (use_vector) {
+      return std::get<vec>(data)[index];
+    }
+    return std::get<arr>(data)[index];
+  }
+
+  [[nodiscard]] size_t size() const { return current_size; }
+
+  void push_back(const T& value) {
+    if (current_size < ShortSize && !use_vector) {
+      std::get<arr>(data)[current_size++] = value;
+    } else {
+      if (current_size == ShortSize && !use_vector) {
+        to_vec();
+      }
+      std::get<vec>(data).push_back(value);
+      current_size++;
+    }
+  }
+
+  void push_back(T&& value) {
+    if (current_size < ShortSize && !use_vector) {
+      std::get<arr>(data)[current_size++] = std::move(value);
+    } else {
+      if (current_size == ShortSize && !use_vector) to_vec();
+      std::get<vec>(data).push_back(std::move(value));
+      current_size++;
+    }
+  }
+
+  template<typename... Args>
+  void emplace_back(Args&&... args) {
+    if (current_size < ShortSize && !use_vector) {
+      std::get<arr>(data)[current_size++] = T(std::forward<Args>(args)...);
+    } else {
+      if (current_size == ShortSize && !use_vector) {
+        to_vec();
+      }
+      std::get<vec>(data).emplace_back(std::forward<Args>(args)...);
+      current_size++;
+    }
+  }
+
+  void resize(const size_t new_size) {
+    if(new_size == current_size) return;
+    if (new_size <= ShortSize && !use_vector) {
+      if (current_size > ShortSize) {
+        auto& vector_data = std::get<vec>(data);
+        arr new_array;
+        for (size_t i = 0; i < std::min(current_size, new_size); ++i) {
+          new_array[i] = std::move(vector_data[i]);
+        }
+        data = std::move(new_array);
+        use_vector = false;
+      }
+    } else {
+      if (current_size <= ShortSize) {
+        to_vec();
+      }
+      std::get<vec>(data).resize(new_size);
+    }
+    current_size = new_size;
+  }
+
+  using iterator = T*;
+  using const_iterator = const T*;
+  iterator begin() {
+    if (use_vector) {
+      return std::get<vec>(data).data();
+    }
+    return std::get<arr>(data).data();
+  }
+  iterator end() {
+    if (use_vector) {
+      return std::get<vec>(data).data() + current_size;
+    }
+    return std::get<arr>(data).data() + current_size;
+  }
+  const_iterator begin() const {
+    if (use_vector) {
+      return std::get<vec>(data).data();
+    }
+    return std::get<arr>(data).data();
+  }
+
+  const_iterator end() const {
+    if (use_vector) {
+      return std::get<vec>(data).data() + current_size;
+    }
+    return std::get<arr>(data).data() + current_size;
+  }
+};
+
 template <const size_t MaxCategoricalSet,
     typename integral_t> class FixedCategoricalSet {
 public:
@@ -688,6 +837,136 @@ struct TreePredictionResult {
   }
 };
 }
+namespace samplers{
+template<typename T, typename scalar_t,
+          const size_t MaxLandmarks>
+struct [[maybe_unused]] LandmarkSampler{
+  std::vector<T> vals;
+  std::vector<scalar_t> weights;
+  containers::ShortVector<size_t, MaxLandmarks> landmarks_id = {};
+  containers::ShortVector<scalar_t, MaxLandmarks> landmarks_val = {};
+  //std::vector<scalar_t> weights;
+  [[maybe_unused]] LandmarkSampler(
+      std::vector<T>&& vals, std::vector<scalar_t>&& weights) :
+        vals(std::move(vals)), weights(std::move(weights)) {
+    scalar_t cumulative_weight = 0.0;
+    size_t landmark_index = 0;
+    const size_t n = this->weights.size();
+    // select number of landmarks dynamically such that it is at most
+    const size_t n_landmarks = std::floor(std::log2(static_cast<float>(n)))+1;
+    if(n_landmarks > landmarks_id.size()) {
+      landmarks_id.resize(n_landmarks);
+      landmarks_val.resize(n_landmarks);
+    }
+    size_t step_size = n / n_landmarks;
+    for (size_t i = 0; i < this->weights.size(); ++i) {
+      cumulative_weight += this->weights[i];
+      if (i % step_size == 0 && (landmark_index + 1) < n_landmarks) {
+        landmarks_id[landmark_index] = i;
+        landmarks_val[landmark_index++] = cumulative_weight;
+      }
+    }
+    // Ensure the last position is included as a landmark
+    landmarks_id[landmark_index] = n-1;
+    landmarks_val[landmark_index] = cumulative_weight;
+  }
+  [[maybe_unused]] void update_weight(const size_t index, const scalar_t new_weight) {
+    const auto weight_diff = new_weight - weights[index];
+    weights[index] = new_weight;
+    // update landmarks
+    size_t i = 0;
+    for(const auto& id : landmarks_id) {
+      if(id >= index) {
+        landmarks_val[i] += weight_diff;
+      }
+      i++;
+    }
+  }
+  template<typename RNG> [[maybe_unused]] T sample(RNG& rng) {
+    std::uniform_real_distribution<scalar_t> dist(0.0, landmarks_val.back());
+    scalar_t smpl = dist(rng);
+    // if the first landmark is greater, we can return early :)
+    if(landmarks_val.front() > smpl) return vals[0];
+    // Linear search on landmarks
+    size_t i = 1;
+    // if a landmark is greater we know we are somewhere in-between
+    for(; i < landmarks_id.size(); i++) {
+      // we found the top landmark
+      if(landmarks_val[i] > smpl) break;
+    }
+    // Linear search within the sub-segment
+    scalar_t cumulative_weight = landmarks_val[i-1];
+    i = landmarks_id[i-1];
+    while(cumulative_weight <= smpl) {
+      cumulative_weight += weights[++i];
+    }
+    return vals[i];
+  }
+};
+template<typename scalar_t,
+          const size_t MaxLandmarks>
+struct [[maybe_unused]] LandmarkSampler<size_t, scalar_t, MaxLandmarks>{
+  std::vector<scalar_t> weights;
+  containers::ShortVector<size_t, MaxLandmarks> landmarks_id = {};
+  containers::ShortVector<scalar_t, MaxLandmarks> landmarks_val = {};
+  //std::vector<scalar_t> weights;
+  [[maybe_unused]] explicit LandmarkSampler(std::vector<scalar_t>&& weights) :
+    weights(std::move(weights)) {
+    scalar_t cumulative_weight = 0.0;
+    size_t landmark_index = 0;
+    const size_t n = this->weights.size();
+    // select number of landmarks dynamically such that it is at most
+    const size_t n_landmarks = std::floor(std::log2(static_cast<float>(n)))+1;
+    if(n_landmarks > landmarks_id.size()) {
+      landmarks_id.resize(n_landmarks);
+      landmarks_val.resize(n_landmarks);
+    }
+    size_t step_size = n / n_landmarks;
+    for (size_t i = 0; i < this->weights.size(); ++i) {
+      cumulative_weight += this->weights[i];
+      if (i % step_size == 0 && (landmark_index + 1) < n_landmarks) {
+        landmarks_id[landmark_index] = i;
+        landmarks_val[landmark_index++] = cumulative_weight;
+      }
+    }
+    // Ensure the last position is included as a landmark
+    landmarks_id[landmark_index] = n-1;
+    landmarks_val[landmark_index] = cumulative_weight;
+  }
+  [[maybe_unused]] void update_weight(const size_t index, const scalar_t new_weight) {
+    const auto weight_diff = new_weight - weights[index];
+    weights[index] = new_weight;
+    // update landmarks
+    size_t i = 0;
+    for(const auto& id : landmarks_id) {
+      if(id >= index) {
+        landmarks_val[i] += weight_diff;
+      }
+      i++;
+    }
+  }
+  template<typename RNG> [[maybe_unused]] size_t sample(RNG& rng) {
+    std::uniform_real_distribution<scalar_t> dist(0.0, landmarks_val.back());
+    scalar_t smpl = dist(rng);
+    // if the first landmark is greater, we can return early :)
+    if(landmarks_val.front() > smpl) return 0;
+    // Linear search on landmarks
+    size_t i = 1;
+    // if a landmark is greater we know we are somewhere in-between
+    for(; i < landmarks_id.size(); i++) {
+      // we found the top landmark
+      if(landmarks_val[i] > smpl) break;
+    }
+    // Linear search within the sub-segment
+    scalar_t cumulative_weight = landmarks_val[i-1];
+    i = landmarks_id[i-1];
+    while(cumulative_weight <= smpl) {
+      cumulative_weight += weights[++i];
+    }
+    return i;
+  }
+};
+}
 namespace serializers{
 template <typename T>
 std::enable_if_t<std::is_arithmetic_v<T>> serialize(const T& value, std::ostream& os) {
@@ -751,13 +1030,188 @@ void deserialize(containers::TreePredictionResult<ResultType>& result, std::istr
   }
 }
 }
+namespace embedders{
+/* technically, 'embeddeds', these things can run path-wise
+ * calculations and accumulate stuff; they can be used e.g. to contain a node's
+ * current depth, regression statistics (for hoeffding trees), ranges (for mondrians)
+ * and whatever else your heart really desires.
+ */
+/* placeholder type that is passed if you do not really need it; note that to
+ * some extent, this is coupled to splitters; the splitter populates the embedder,
+ * so the goal is to have a compile error if an empty embedder is passed
+ * to a splitter which wants to populate it
+ */
+struct [[maybe_unused]] EmbedderEmpty{};
+template<typename scalar_t, typename integral_t, const size_t MaxCategoricalSet>
+struct [[maybe_unused]] MondrianEmbedder{
+  using CatSet = containers::FixedCategoricalSet<MaxCategoricalSet, integral_t>;
+  // needs to embed splitting times and all ranges
+  std::vector<size_t> feats;
+  std::vector<scalar_t> splitting_times;
+  std::vector<std::variant<std::pair<scalar_t, scalar_t>, CatSet>> ranges;
+  // currently only supports single target
+  [[maybe_unused]] explicit MondrianEmbedder(
+      const std::vector<size_t>& available_features) :
+        feats(available_features), splitting_times(std::vector<scalar_t>()),
+        ranges(std::vector<std::pair<scalar_t, scalar_t>>()) {}
+  auto operator [](const size_t index) -> std::pair<decltype(ranges.begin()),
+                                                    decltype(ranges.begin())>{
+    // needs to return a pair of iterators that point to start/end of a range
+    return {ranges.begin() + (index * feats.size()),
+            ranges.begin() + ((index + 1) * feats.size())};
+  }
+  auto data_range_visitor(
+      const std::variant<std::vector<scalar_t>, std::vector<integral_t>>& data,
+      const std::vector<size_t> &indices, const size_t start, const size_t end) {
+    return std::visit([&indices, start, end](auto&& arg) ->
+      std::variant<std::pair<scalar_t, scalar_t>, CatSet> {
+        using T = std::decay_t<decltype(arg)>;
+        if constexpr (std::is_same_v<T, std::vector<integral_t>>) {
+          CatSet cat_set;
+          for (size_t i = start; i < end; i++) cat_set.add(arg[indices[i]]);
+          return cat_set;
+        } else if constexpr (std::is_same_v<T, std::vector<scalar_t>>) {
+          scalar_t min = std::numeric_limits<scalar_t>::max();
+          scalar_t max = std::numeric_limits<scalar_t>::lowest();
+          for(size_t i = start; i < end; i++) {
+            const auto val = arg[indices[i]];
+            if (val < min) min = val;
+            else if (val > max) max = val;
+          }
+          return std::pair<scalar_t, scalar_t>(min,max);
+        }}, data);
+  }
+  scalar_t to_size(
+      const std::variant<std::pair<scalar_t, scalar_t>, CatSet>& space) const {
+    return std::visit([](auto&& arg) -> scalar_t {
+                        using T = std::decay_t<decltype(arg)>;
+                        if constexpr (std::is_same_v<T, std::pair<scalar_t, scalar_t>>) {
+                          return arg.second - arg.first;
+                        } else if constexpr (std::is_same_v<T, CatSet>) {
+                          return static_cast<scalar_t>(arg.size);
+                        }}, space);
+  }
+  [[maybe_unused]] scalar_t box_size() const {
+    return std::reduce(ranges.begin(), ranges.end(), scalar_t(0),
+                           [this](const scalar_t acc, const auto &space) {
+                             return acc + to_size(space);
+                           });
+  }
+  [[maybe_unused]] void embed(
+      const std::vector<
+          std::variant<std::vector<integral_t>,std::vector<scalar_t>>
+          > &data,
+      std::vector<size_t> &indices,
+      size_t start, size_t end,
+      const scalar_t split_time) {
+
+    /*for(const auto& feat : feats) {
+      ranges.push_back(
+          data_range_visitor(
+              data[feat], indices, start, end));
+      splitting_times.push_back(split_time);
+    }*/
+    splitting_times.push_back(split_time);
+  }
+};
+template <typename scalar_t, typename integral_t>
+struct [[maybe_unused]] HoeffdingEmbedder{
+  // currently only supports single target
+  [[maybe_unused]] explicit HoeffdingEmbedder(const size_t target_) :
+    target(target_), values(std::vector<utils::Welford<scalar_t>>(0)) {}
+  auto operator [](const size_t index) {
+    // get value at specified index; this is the welford object with mean/sd methods
+    return values[index];
+  }
+  [[maybe_unused]] void embed(
+      const std::vector<
+          std::variant<std::vector<integral_t>,std::vector<scalar_t>>
+          > &data,
+      std::vector<size_t> &indices,
+      size_t start, size_t end) {
+    // consumes data, embeds additional thing to values
+    const auto& targ = std::get<std::vector<scalar_t>>(data[target]);
+    utils::Welford<scalar_t> temp;
+    for(size_t i = start; i< end; i++) {
+      temp(targ[indices[i]]);
+    }
+    values.push_back(temp);
+  }
+  size_t target;
+  std::vector<utils::Welford<scalar_t>> values;
+};
+}
 namespace splitters {
+
+template<typename scalar_t, typename integral_t, const size_t MaxCategoricalSet,
+    typename RNG>
+struct RandomFeatureVisitor {
+  const std::vector<std::variant<std::vector<integral_t>, std::vector<scalar_t>>>
+      &data;
+  const size_t feature;
+  std::vector<size_t> &indices;
+  size_t start;
+  size_t end;
+  RNG &rng;
+
+  std::pair<bool, std::variant<scalar_t, containers::FixedCategoricalSet<MaxCategoricalSet, integral_t>>>
+  operator()(const std::vector<scalar_t> &) const noexcept {
+    return {selectMIADirection(), selectRandomThreshold()};
+  }
+
+  std::pair<bool, std::variant<scalar_t, containers::FixedCategoricalSet<MaxCategoricalSet, integral_t>>>
+  operator()(const std::vector<integral_t> &) const noexcept {
+    return {selectMIADirection(), selectRandomCategoricalSet()};
+  }
+
+  scalar_t selectRandomThreshold() const noexcept {
+    const auto &numericData = std::get<std::vector<scalar_t>>(data[feature]);
+    // compute min and max in a single pass
+    scalar_t min_val = std::numeric_limits<scalar_t>::max();
+    scalar_t max_val = std::numeric_limits<scalar_t>::lowest();
+    for (size_t i = start; i < end; ++i) {
+      scalar_t val = numericData[indices[i]];
+      if (!std::isnan(val)) {
+        min_val = std::min(min_val, val);
+        max_val = std::max(max_val, val);
+      }
+    }
+    // sample uniformly between min and max
+    std::uniform_real_distribution<scalar_t> dist(min_val, max_val);
+    return dist(rng);
+  }
+  [[nodiscard]] bool selectMIADirection() const noexcept {
+    return std::bernoulli_distribution(0.5)(rng);
+  }
+
+  containers::FixedCategoricalSet<MaxCategoricalSet, integral_t>
+  selectRandomCategoricalSet() const noexcept {
+    std::unordered_set<integral_t> uniqueValues;
+    const auto &categoricalData =
+        std::get<std::vector<integral_t>>(data[feature]);
+    for (size_t i = start; i < end; ++i) {
+      uniqueValues.insert(categoricalData[indices[i]]);
+    }
+    const size_t n_selected = utils::select_from_range(uniqueValues.size(), rng);
+    std::array<integral_t, MaxCategoricalSet> shuffle_temp;
+    size_t i = 0;
+    for (const auto &val : uniqueValues) {
+      shuffle_temp[i++] = val;
+    }
+    std::shuffle(shuffle_temp.begin(), shuffle_temp.begin() + i, rng);
+    containers::FixedCategoricalSet<MaxCategoricalSet, integral_t> categoricalSet;
+    for (i = 0; i < n_selected; ++i) {
+      categoricalSet.add(shuffle_temp[i]);
+    }
+    return categoricalSet;
+  }
+};
 template <typename RNG, typename scalar_t = double,
           typename integral_t = size_t,
           const size_t MaxCategoricalSet = 10>
 class [[maybe_unused]] ExtremelyRandomizedStrategy {
 public:
-  void select_split(
+  [[maybe_unused]] void select_split(
       const std::vector<
           std::variant<std::vector<integral_t>, std::vector<scalar_t>>> &data,
       std::vector<size_t> &indices,
@@ -766,76 +1220,103 @@ public:
     const size_t feature =
         available_features[utils::select_from_range(available_features.size(), rng)];
     auto [mia_direction, threshold] = std::visit(
-        FeatureVisitor{data, feature, indices, start, end, rng}, data[feature]);
+        RandomFeatureVisitor<scalar_t, integral_t, MaxCategoricalSet, RNG>{
+            data, feature, indices, start, end, rng}, data[feature]);
     node.featureIndex = feature;
     node.threshold = threshold;
     node.missing_goes_right = mia_direction;
   }
-
-private:
-  struct FeatureVisitor {
-    const std::vector<std::variant<std::vector<integral_t>, std::vector<scalar_t>>>
-        &data;
-    const size_t feature;
-    std::vector<size_t> &indices;
-    size_t start;
-    size_t end;
-    RNG &rng;
-
-    std::pair<bool, std::variant<scalar_t, containers::FixedCategoricalSet<MaxCategoricalSet, integral_t>>>
-    operator()(const std::vector<scalar_t> &) const noexcept {
-      return {selectMIADirection(), selectRandomThreshold()};
-    }
-
-    std::pair<bool, std::variant<scalar_t, containers::FixedCategoricalSet<MaxCategoricalSet, integral_t>>>
-    operator()(const std::vector<integral_t> &) const noexcept {
-      return {selectMIADirection(), selectRandomCategoricalSet()};
-    }
-
-    scalar_t selectRandomThreshold() const noexcept {
-      const auto &numericData = std::get<std::vector<scalar_t>>(data[feature]);
-      // compute min and max in a single pass
-      scalar_t min_val = std::numeric_limits<scalar_t>::max();
-      scalar_t max_val = std::numeric_limits<scalar_t>::lowest();
-      for (size_t i = start; i < end; ++i) {
-        scalar_t val = numericData[indices[i]];
-        if (!std::isnan(val)) {
-          min_val = std::min(min_val, val);
-          max_val = std::max(max_val, val);
-        }
-      }
-      // sample uniformly between min and max
-      std::uniform_real_distribution<scalar_t> dist(min_val, max_val);
-      return dist(rng);
-    }
-    [[nodiscard]] bool selectMIADirection() const noexcept {
-      return std::bernoulli_distribution(0.5)(rng);
-    }
-
-    containers::FixedCategoricalSet<MaxCategoricalSet, integral_t>
-        selectRandomCategoricalSet() const noexcept {
-      std::unordered_set<integral_t> uniqueValues;
-      const auto &categoricalData =
-          std::get<std::vector<integral_t>>(data[feature]);
-      for (size_t i = start; i < end; ++i) {
-        uniqueValues.insert(categoricalData[indices[i]]);
-      }
-      const size_t n_selected = utils::select_from_range(uniqueValues.size(), rng);
-      std::array<integral_t, MaxCategoricalSet> shuffle_temp;
-      size_t i = 0;
-      for (const auto &val : uniqueValues) {
-        shuffle_temp[i++] = val;
-      }
-      std::shuffle(shuffle_temp.begin(), shuffle_temp.begin() + i, rng);
-      containers::FixedCategoricalSet<MaxCategoricalSet, integral_t> categoricalSet;
-      for (i = 0; i < n_selected; ++i) {
-        categoricalSet.add(shuffle_temp[i]);
-      }
-      return categoricalSet;
-    }
-  };
 };
+template <typename RNG, typename scalar_t = double,
+          typename integral_t = size_t,
+          const size_t MaxCategoricalSet = 10>
+class [[maybe_unused]] MondrianStrategy {
+  /* need to keep track of feature ranges for scaling windows (against total
+   * feature size) - basically how much of the d-th dimension of the hypercube
+   * did we already partition? otherwise the algorithm breaks down for features
+   * on different scales
+   * note that under updates this also needs to be updated, but that should hopefully
+   * be ok
+   */
+  std::vector<std::variant<std::pair<scalar_t, scalar_t>, size_t>> global_ranges = {};
+  scalar_t lambda, total_volume, current_volume;
+  // keep track of first update for offline learning; only do the update once then
+  bool first = true;
+  samplers::LandmarkSampler<size_t, scalar_t, 10000> sampler;
+public:
+  bool select_split(
+      const std::vector<
+          std::variant<std::vector<integral_t>,
+              std::vector<scalar_t>>> &data,
+      std::vector<size_t> &indices,
+      const std::vector<size_t> &available_features, size_t start, size_t end,
+      std::vector<containers::Node<scalar_t, integral_t, MaxCategoricalSet>> &nodes,
+      RNG &rng, const size_t node_index, const size_t depth,
+      embedders::MondrianEmbedder<scalar_t, integral_t,MaxCategoricalSet>& embedder,
+      containers::ShortVector<size_t, 32>& pathway) {
+    if(first) {
+      for(const auto& feat : embedder.feats) {
+        global_ranges.push_back(
+            embedder.data_range_visitor(data[feat], indices, start, end));
+      }
+      // initialize landmark sampler
+      std::vector<scalar_t> weights(global_ranges.size(), 1.);
+      sampler = samplers::LandmarkSampler<size_t, scalar_t, 10000>(weights);
+      first = false;
+    }
+    // trace parent cuttings to figure out how much smaller the current box is
+    // and also what to update - this saves us from re-embedding all the data
+    scalar_t total_vol = global_ranges.size();
+    // hopefully no one wants a vector longer than this - it uses all the
+    // cuttings in all the tree, and a tree of depth 32 is pretty humongous
+    // remove repeated cuttings
+    utils::deduplicate(pathway);
 
+    // TODO(JSzitas): consider the following: under no split when we stop splitting,
+    // we have reached what is, for the time being, a terminal node. thus,
+    // under such circumstances, we can reset weights.
+    // if we are not infact in a terminal node, we must be in a node that follows
+    // from some parent node that already incorporates all the information
+    // thus we only need to update the weight we are splitting on in this node,
+    // at all nodes; the split induces a reduction of weight right AFTER split
+    // thus we get to keep volume and cut it, and it resets only once we stop splitting
+
+
+    // reset sampler weights
+    std::fill(sampler.begin(), sampler.end(), 1.0);
+    // recompute volumes on unique used features
+    for (const auto &feat : pathway) {
+      // figure out which feature this was originally
+      auto which_id = *std::find(embedder.feats.begin(), embedder.feats.end(), feat);
+      scalar_t current_vol = embedder.to_size(
+                                 embedder.data_range_visitor(
+                                     data[feat], indices, start, end)) /
+          to_size(global_ranges[feat]);
+      // update sampler weight
+      sampler.update_weight(which_id, current_vol);
+      // update total 'volume'
+      total_vol -= current_vol;
+    }
+    // sample from exponential/size
+    const scalar_t E = std::exponential_distribution<scalar_t>(1)(rng)/total_vol;
+    // check if greater than splitting time limit, if not return false
+    if(embedder.splitting_times[parent_index] + E <= lambda) {
+      // embeddable required
+      // this is actually weighed sampling
+      const size_t feature =
+          available_features[utils::select_from_range(available_features.size(), rng)];
+
+      auto [mia_direction, threshold] = std::visit(
+          RandomFeatureVisitor<scalar_t, integral_t, MaxCategoricalSet, RNG>{
+              data, feature, indices, start, end, rng}, data[feature]);
+      nodes[node_index].featureIndex = feature;
+      nodes[node_index].threshold = threshold;
+      nodes[node_index].missing_goes_right = mia_direction;
+      return true;
+    }
+    return false;
+  }
+};
 template <typename RNG, typename scalar_t = double,
           typename integral_t = size_t,
           const size_t MaxCategoricalSet = 32>
@@ -995,7 +1476,88 @@ private:
     }
   };
 };
-}
+class [[maybe_unused]] HoeffdingStrategy{
+  /*
+  delta_(delta), max_samples_per_node_(max_samples_per_node)
+                     scalar_t compute_hoeffding_bound(scalar_t range, scalar_t confidence, int n) {
+    return sqrt((range * range * log(1.0 / confidence)) / (2.0 * n));
+  }
+  void update_statistics(size_t terminal_index, scalar_t target) {
+    auto& stats = statistics_[terminal_index];
+    stats.add(target);
+  }
+  void attempt_split(containers::Node<scalar_t, integral_t, MaxCategoricalSet>& node,
+                     const std::vector<std::vector<scalar_t>>& data_stream) {
+    auto& stats = statistics_[node.terminal_index];
+
+    // Check if we have enough samples to consider a split
+    if (stats.count >= max_samples_per_node_) {
+      scalar_t best_variance_reduction = 0.0;
+      size_t best_feature = std::numeric_limits<size_t>::max();
+      scalar_t best_split = 0.0;
+
+      for (size_t feature = 0; feature < data_stream[0].size() - 1; ++feature) {
+        // Assuming the last column is the target
+        // Sort instances by the current feature
+        std::vector<std::pair<scalar_t, scalar_t>> feature_target_pairs;
+        for (const auto& instance : data_stream) {
+          feature_target_pairs.emplace_back(instance[feature], instance.back());
+        }
+
+        std::sort(feature_target_pairs.begin(), feature_target_pairs.end());
+
+        // Initialize left and right statistics
+        RegressionStatistics left_stats, right_stats;
+        for (const auto& [feature_value, target_value] : feature_target_pairs) {
+          right_stats.add(target_value);
+        }
+
+        // Evaluate split points between consecutive feature values
+        for (size_t i = 0; i < feature_target_pairs.size() - 1; ++i) {
+          left_stats.add(feature_target_pairs[i].second);
+          right_stats.count--; // Decrement right count
+          right_stats.mean *= right_stats.count / (right_stats.count + 1);
+          scalar_t delta = feature_target_pairs[i].second - right_stats.mean;
+          right_stats.mean += delta / right_stats.count;
+          right_stats.m2 -= delta * (feature_target_pairs[i].second - right_stats.mean);
+
+          if (feature_target_pairs[i].first != feature_target_pairs[i + 1].first) {
+            // Compute variance reduction
+            scalar_t variance_reduction = stats.variance()
+                                          - ((left_stats.count / static_cast<scalar_t>(stats.count)) * left_stats.variance()
+                                             + (right_stats.count / static_cast<scalar_t>(stats.count)) * right_stats.variance());
+
+            // Check if this split is better
+            if (variance_reduction > best_variance_reduction) {
+              best_variance_reduction = variance_reduction;
+              best_feature = feature;
+              best_split = (feature_target_pairs[i].first + feature_target_pairs[i + 1].first) / 2.0;
+            }
+          }
+        }
+      }
+
+      // Use Hoeffding bound to decide whether to split
+      scalar_t epsilon = compute_hoeffding_bound(1.0, delta_, stats.count);
+      if (best_variance_reduction > epsilon) {
+        // Perform the split
+        containers::Node<scalar_t, integral_t, MaxCategoricalSet> left, right;
+        node.split_feature = best_feature;
+        node.threshold = best_split;
+        node.left = nodes_.size();
+        node.right = nodes_.size() + 1;
+        nodes_.push_back(left);
+        nodes_.push_back(right);
+        statistics_.emplace_back(RegressionStatistics());
+        statistics_.emplace_back(RegressionStatistics());
+      }
+    }
+  }
+  scalar_t delta_;
+  size_t max_samples_per_node_;
+   */
+};
+};
 namespace reducers{
 template<typename scalar_t> struct defaultImportanceReducer {
   scalar_t operator()(const std::vector<std::pair<scalar_t, size_t>>& x) {
@@ -1026,7 +1588,7 @@ template<typename scalar_t> struct defaultImportanceReducer {
 }
 template <typename ResultF, typename RNG, typename SplitStrategy,
           const size_t MaxCategoricalSet = 32, typename scalar_t = double,
-          typename integral_t = size_t>
+          typename integral_t = size_t, typename Embedder = embedders::EmbedderEmpty>
 class RandomTree {
   using FeatureData = std::variant<
       std::vector<integral_t>,
@@ -1043,15 +1605,16 @@ class RandomTree {
   std::vector<ResultType> terminal_values;
   SplitStrategy &split_strategy;
   bool preallocated = false;
+  Embedder embedder;
 public:
-  [[maybe_unused]] RandomTree<ResultF, RNG, SplitStrategy, MaxCategoricalSet,
-                              scalar_t>(const size_t maxDepth,
-                                        const size_t minNodesize,
-                                        RNG &rng,
-                                        ResultF &terminalNodeFunc,
-                                        SplitStrategy &strategy) noexcept
+  [[maybe_unused]] RandomTree(const size_t maxDepth,
+                              const size_t minNodesize,
+                              RNG &rng,
+                              ResultF &terminalNodeFunc,
+                              SplitStrategy &strategy) noexcept
       : maxDepth(maxDepth), minNodesize(minNodesize), rng(rng),
-        terminalNodeFunc(terminalNodeFunc), split_strategy(strategy) {
+        terminalNodeFunc(terminalNodeFunc), split_strategy(strategy),
+        embedder(Embedder()) {
     nodes.reserve(static_cast<size_t>(std::pow(2, maxDepth + 1) - 1));
     terminal_values = std::vector<ResultType>{};
   }
@@ -1119,13 +1682,14 @@ public:
   [[maybe_unused]] auto eval_oob(
       const std::vector<FeatureData> &oob_data,
       std::vector<size_t> &indices) {
+    Metric metric;
     using MetricResultType = decltype(std::declval<Metric>()(
       std::declval<ResultType&>(), std::declval<const std::vector<FeatureData> &>(),
       std::declval<const std::vector<size_t>&>(),
       std::declval<const size_t>(), std::declval<const size_t>()));
     std::vector<std::pair<MetricResultType, size_t>> results;
     eval_oob_impl<Metric,false>(
-        0, oob_data, indices, 0, indices.size(), results, 0);
+        0, oob_data, indices, 0, indices.size(), results, 0, metric);
     return Reducer()(results);
   }
   template<typename Metric,
@@ -1134,13 +1698,45 @@ public:
       const std::vector<FeatureData> &oob_data,
       std::vector<size_t> &indices,
       const size_t excluded_feature) {
+    Metric metric;
     using MetricResultType = decltype(std::declval<Metric>()(
       std::declval<ResultType&>(), std::declval<const std::vector<FeatureData> &>(),
       std::declval<const std::vector<size_t>&>(),
       std::declval<const size_t>(), std::declval<const size_t>()));
     std::vector<std::pair<MetricResultType, size_t>> results;
     eval_oob_impl<Metric,true>(
-        0, oob_data, indices, 0, indices.size(), results, excluded_feature);
+        0, oob_data, indices, 0, indices.size(), results, excluded_feature, metric);
+    return Reducer()(results);
+  }
+  template<typename Metric,
+            typename Reducer = treeson::reducers::defaultImportanceReducer<scalar_t>>
+  [[maybe_unused]] auto eval_oob(
+      const std::vector<FeatureData> &oob_data,
+      std::vector<size_t> &indices,
+      Metric& metric) {
+    using MetricResultType = decltype(std::declval<Metric>()(
+        std::declval<ResultType&>(), std::declval<const std::vector<FeatureData> &>(),
+        std::declval<const std::vector<size_t>&>(),
+        std::declval<const size_t>(), std::declval<const size_t>()));
+    std::vector<std::pair<MetricResultType, size_t>> results;
+    eval_oob_impl<Metric,false>(
+        0, oob_data, indices, 0, indices.size(), results, 0, metric);
+    return Reducer()(results);
+  }
+  template<typename Metric,
+            typename Reducer = treeson::reducers::defaultImportanceReducer<scalar_t>>
+  [[maybe_unused]] auto eval_oob(
+      const std::vector<FeatureData> &oob_data,
+      std::vector<size_t> &indices,
+      const size_t excluded_feature,
+      Metric& metric) {
+    using MetricResultType = decltype(std::declval<Metric>()(
+        std::declval<ResultType&>(), std::declval<const std::vector<FeatureData> &>(),
+        std::declval<const std::vector<size_t>&>(),
+        std::declval<const size_t>(), std::declval<const size_t>()));
+    std::vector<std::pair<MetricResultType, size_t>> results;
+    eval_oob_impl<Metric,true>(
+        0, oob_data, indices, 0, indices.size(), results, excluded_feature, metric);
     return Reducer()(results);
   }
   void from_nodes(
@@ -1262,8 +1858,32 @@ public:
     } else {
       nodes[parentIndex].right = nodeIndex; // Right child
     }
-    split_strategy.select_split(data, indices, available_features, start, end,
-                                nodes[nodeIndex], rng);
+    if constexpr (std::is_invocable_v<
+                      decltype(&SplitStrategy::select_split), SplitStrategy,
+                      const std::vector<FeatureData> &, std::vector<size_t> &,
+                      const std::vector<size_t> &, size_t, size_t,
+                      containers::Node<scalar_t, integral_t, MaxCategoricalSet>
+                          &,
+                      RNG &>) {
+      split_strategy.select_split(data, indices, available_features, start, end,
+                                  nodes[nodeIndex], rng);
+    } else if constexpr (
+        std::is_invocable_v<
+            decltype(&SplitStrategy::select_split), SplitStrategy,
+            const std::vector<FeatureData> &, std::vector<size_t> &,
+            const std::vector<size_t> &, size_t, size_t,
+            std::vector<containers::Node<scalar_t, integral_t, MaxCategoricalSet>> &, RNG &,
+            size_t, size_t, Embedder&>) {
+      // re-travel tree path and collect cut features
+      containers::ShortVector<size_t, 32> pathway{};
+      travel(0, data, indices, start, pathway);
+      const bool did_split =
+          split_strategy.select_split(data, indices, available_features, start, end,
+                                      nodes, rng, nodeIndex, depth,
+                                      embedder, pathway);
+      // there possibly an early return if splitting is rejected i.e. in mondrians
+      if(!did_split) return;
+    }
     size_t mid = reorder_indices(data, nodes[nodeIndex], start, end, indices);
     // if a child node would be too small
     if (((mid - start) <= minNodesize) || ((end - mid) <= minNodesize) ||
@@ -1315,11 +1935,11 @@ public:
                                     std::declval<ResultType&>(), std::declval<const std::vector<FeatureData> &>(),
                                     std::declval<const std::vector<size_t>&>(),
                                     std::declval<const size_t>(), std::declval<const size_t>())),size_t>>& results,
-      const size_t excluded_feature) const noexcept {
+      const size_t excluded_feature, Metric& metric) const noexcept {
         const auto &node = nodes[nodeIndex];
         if (node.left == 0 && node.right == 0) {
           const auto& vals = terminal_values[node.terminal_index];
-          results.push_back(std::pair(Metric()(vals, oob_data, indices, start, end), end-start));
+          results.push_back(std::pair(metric(vals, oob_data, indices, start, end), end-start));
           return;
         }
         if constexpr(exclude_feature) {
@@ -1327,10 +1947,10 @@ public:
             // consider that this probably returns only per one of these branches
             eval_oob_impl<Metric, true>(
                 node.left, oob_data,
-                indices, start, end, results, excluded_feature);
+                indices, start, end, results, excluded_feature, metric);
             eval_oob_impl<Metric, true>(
                 node.right, oob_data,
-                indices, start, end, results, excluded_feature);
+                indices, start, end, results, excluded_feature, metric);
           }
         }
         auto mid = reorder_indices(
@@ -1338,12 +1958,12 @@ public:
         if (mid > start) {
           eval_oob_impl<Metric, false>(
               node.left, oob_data,
-              indices, start, mid, results, excluded_feature);
+              indices, start, mid, results, excluded_feature, metric);
         }
         if (mid < end) {
           eval_oob_impl<Metric, false>(
               node.right, oob_data,
-              indices, mid, end, results, excluded_feature);
+              indices, mid, end, results, excluded_feature, metric);
         }
     }
   void print_node(size_t node_index, size_t depth) const noexcept {
@@ -1408,6 +2028,33 @@ public:
           indices, mid, end, predictionResult);
     }
   }
+  template<typename T>
+  void travel(size_t nodeIndex, const std::vector<FeatureData> &data,
+              std::vector<size_t> &indices, const size_t inner_id,
+              T& pathway) const noexcept {
+    const auto &node = nodes[nodeIndex];
+    // terminal leaf; we have arrived
+    if (node.left == 0) {return;}
+    // record pathway
+    pathway.emplace_back(nodeIndex);
+    // determine where to next
+    auto& featureData = data[node.featureIndex];
+    const auto miss_dir = node.getMIADirection();
+    bool left = false;
+    if (node.isCategorical()) {
+      const auto &catSet = node.getCategoricalSet();
+      const auto &catData = std::get<std::vector<integral_t>>(featureData);
+      left = catSet.contains(catData[indices[inner_id]]);
+    }
+    else {
+        const auto &numThreshold = node.getNumericThreshold();
+        const auto &numData = std::get<std::vector<scalar_t>>(featureData);
+        const auto val = numData[indices[inner_id]];
+        left = (val <= numThreshold) || (std::isnan(val) && miss_dir);
+    }
+    travel(left ? node.left : node.right, data, indices, inner_id, pathway);
+  }
+
   size_t reorder_indices(const std::vector<FeatureData>& data,
                          const treeson::containers::Node<scalar_t, integral_t, MaxCategoricalSet>& node,
                          const size_t start, const size_t end, std::vector<size_t>& indices) const {
@@ -1438,6 +2085,12 @@ public:
     return mid;
   }
 };
+  // always uses a mondrian split strategy - requires storing node metadata
+  // possibly a std::optional<stuff> node_metadata; that is used
+  // only when a splitter is invoked that requires/manipulates node metadata
+  // note that any update in mondrian tree only requires updating ranges/sets
+  //
+
 /* TODO(JSzitas): this doesnt actually work right now
 template <typename scalar_t, typename integral_t, const size_t MaxCategoricalSet>
 class HoeffdingTree {
@@ -1590,6 +2243,13 @@ public:
                                 SplitStrategy &strategy) :
         maxDepth(maxDepth), minNodesize(minNodesize), rng(rng),
         terminalNodeFunc(terminalNodeFunc), strategy(strategy) {}
+  [[maybe_unused]] RandomForest(const size_t maxDepth,
+                                const size_t minNodesize,
+                                RNG&& rng,
+                                ResultF &&terminalNodeFunc,
+                                SplitStrategy &strategy) :
+    maxDepth(maxDepth), minNodesize(minNodesize), rng(std::move(rng)),
+    terminalNodeFunc(std::move(terminalNodeFunc)), strategy(std::move(strategy)) {}
   [[maybe_unused]] void fit(const std::vector<FeatureData> &data,
            const size_t n_tree,
            const std::vector<size_t> &nosplit_features,
@@ -1739,25 +2399,59 @@ public:
     const size_t actual_num_threads = threading::thread_heuristic(num_threads);
     if(actual_num_threads == 1) {
       if constexpr(Method == ImportanceMethod::Omit) {
-        feature_importance_omit_st<Accumulator, Metric, Importance>(
+        return feature_importance_omit_st<Accumulator, Metric, Importance>(
             train_data, n_tree, nosplit_features, oob, bootstrap_size);
       }
       if constexpr (Method == ImportanceMethod::Contrast) {
-        feature_importance_contrast_st<Accumulator, Metric, Importance>(
+        return feature_importance_contrast_st<Accumulator, Metric, Importance>(
             train_data, n_tree, nosplit_features, oob, bootstrap_size);
       }
-      return;
     }
     if constexpr(Method == ImportanceMethod::Omit) {
-      feature_importance_omit_mt<Accumulator, Metric, Importance>(
+      return feature_importance_omit_mt<Accumulator, Metric, Importance>(
           train_data, n_tree, nosplit_features, oob, bootstrap_size,
           actual_num_threads);
     }
-    if constexpr (Method == ImportanceMethod::Contrast) {
-      feature_importance_contrast_mt<Accumulator, Metric, Importance>(
+    // used as base case
+    //if constexpr (Method == ImportanceMethod::Contrast) {
+    return feature_importance_contrast_mt<Accumulator, Metric, Importance>(
           train_data, n_tree, nosplit_features, oob, bootstrap_size,
           actual_num_threads);
+    //}
+  }
+  // Feature importance method
+  template<typename Accumulator, typename Metric, typename Importance,
+            const ImportanceMethod Method = ImportanceMethod::Omit>
+  [[maybe_unused]] auto feature_importance(
+      Metric& metric,
+      const std::vector<FeatureData> &train_data,
+      const size_t n_tree,
+      const std::vector<size_t> &nosplit_features,
+      const bool oob = true,
+      const size_t sample_size = 0,
+      const size_t num_threads = 0) {
+    size_t bootstrap_size = sample_size > 0 ? sample_size :
+                                            utils::size(train_data[0]);
+    const size_t actual_num_threads = threading::thread_heuristic(num_threads);
+    if(actual_num_threads == 1) {
+      if constexpr(Method == ImportanceMethod::Omit) {
+        return feature_importance_omit_st<Accumulator, Metric, Importance>(
+            metric, train_data, n_tree, nosplit_features, oob, bootstrap_size);
+      }
+      if constexpr (Method == ImportanceMethod::Contrast) {
+        return feature_importance_contrast_st<Accumulator, Metric, Importance>(
+            metric, train_data, n_tree, nosplit_features, oob, bootstrap_size);
+      }
     }
+    if constexpr(Method == ImportanceMethod::Omit) {
+      return feature_importance_omit_mt<Accumulator, Metric, Importance>(
+          metric, train_data, n_tree, nosplit_features, oob, bootstrap_size,
+          actual_num_threads);
+    }
+    // used as base case
+    return feature_importance_contrast_mt<Accumulator, Metric, Importance>(
+        metric, train_data, n_tree, nosplit_features, oob, bootstrap_size,
+        actual_num_threads);
   }
   [[maybe_unused]] void print() {
     for(const auto& tree : trees)
@@ -2143,7 +2837,7 @@ std::vector<containers::TreePredictionResult<ResultType>> predict_from_file_mt(
           tree.fit(train_data, train_indices, nosplit_features);
           if (tree.is_uninformative()) {
             // make it clear that this tree does not count
-            return;
+            continue;
           }
           auto used_features = tree.used_features();
           // compute baseline - update first accumulator
@@ -2273,7 +2967,7 @@ std::vector<containers::TreePredictionResult<ResultType>> predict_from_file_mt(
         tree.fit(train_data, train_indices, nosplit_features);
         if (tree.is_uninformative()) {
           // make it clear that this tree does not count
-          return;
+          continue;
         }
         auto used_features = tree.used_features();
         const auto& res = tree.template eval_oob<Metric>(train_data, test_indices);
@@ -2365,27 +3059,266 @@ std::vector<containers::TreePredictionResult<ResultType>> predict_from_file_mt(
     }
     return importances;
   }
-  /*
-  memory::MemoryPool<>& initialize_pool(const size_t num_threads) {
-    TreeType tree(maxDepth, minNodesize, rng, terminalNodeFunc,
-                  strategy);
-    std::vector<size_t> train_indices, test_indices;
-    if (oob) {
-      std::tie(train_indices, test_indices) =
-          treeson::utils::bootstrap_two_samples(indices, bootstrap_size,
-                                                rng);
-    } else {
-      train_indices =
-          treeson::utils::bootstrap_sample(indices, bootstrap_size, rng);
-      test_indices = train_indices;
+  // Feature importance method - omission of variable by ignoring split
+  template<typename Accumulator, typename Metric, typename Importance>
+  [[maybe_unused]] auto feature_importance_omit_st(
+      Metric& metric,
+      const std::vector<FeatureData> &train_data,
+      const size_t n_tree,
+      const std::vector<size_t> &nosplit_features,
+      const bool oob,
+      const size_t bootstrap_size) {
+    // we do not allow resampling as such here because it complicates the interface
+    // and leaves us in an equal 'in-bag error' situation as if sample size was just set
+    // to total size.
+    std::vector<size_t> indices = utils::make_index_range(utils::size(train_data[0]));
+    /* N.B.: outer scope forces thread-pool to finish - important!!!
+     without this we can proceed onto the importance stuff BEFORE we have
+     any results, so this MUST be closed off.*/
+    std::vector<Accumulator> accumulators(train_data.size() + 1);
+    /* N.B.: outer scope forces thread-pool to finish - important!!!
+    without this we can proceed onto the importance stuff BEFORE we have
+    any results, so this MUST be closed off.*/
+    {
+      for (size_t i = 0; i < n_tree; ++i) {
+        TreeType tree(maxDepth, minNodesize, rng, terminalNodeFunc,
+                      strategy);
+        std::vector<size_t> train_indices, test_indices;
+        if (oob) {
+          std::tie(train_indices, test_indices) =
+              treeson::utils::bootstrap_two_samples(indices, bootstrap_size,
+                                                    rng);
+        } else {
+          train_indices =
+              treeson::utils::bootstrap_sample(indices, bootstrap_size, rng);
+          test_indices = train_indices;
+        }
+        tree.fit(train_data, train_indices, nosplit_features);
+        if (tree.is_uninformative()) {
+          // make it clear that this tree does not count
+          continue;
+        }
+        auto used_features = tree.used_features();
+        // compute baseline - update first accumulator
+        accumulators[0](tree.eval_oob(train_data, test_indices, metric));
+        // update all other accumulators
+        for (const auto feature : used_features) {
+          accumulators[feature + 1](
+              tree.eval_oob(train_data, test_indices, feature, metric));
+        }
+      }
     }
-    tree.fit(train_data, train_indices, nosplit_features);
-    if (tree.is_uninformative()) {
-      // make it clear that this tree does not count
-      return;
+    // convert from accumulator values to importances
+    Importance importance_;
+    std::vector<decltype(importance_(accumulators.front().result(),
+                                     accumulators.front().result())
+                             )> importances(accumulators.size()-1);
+    const auto baseline_results = accumulators.front().result();
+    for (size_t feature_i = 0; feature_i < accumulators.size()-1; feature_i++) {
+      importances[feature_i] = importance_(
+          baseline_results, accumulators[feature_i+1].result());
     }
-    auto used_features = tree.used_features();
-  }*/
+    return importances;
+  }
+  template<typename Accumulator, typename Metric, typename Importance>
+  [[maybe_unused]] auto feature_importance_omit_mt(
+      Metric& metric,
+      const std::vector<FeatureData> &train_data,
+      const size_t n_tree,
+      const std::vector<size_t> &nosplit_features,
+      const bool oob = true,
+      const size_t bootstrap_size = 0,
+      const size_t actual_num_threads = 0) {
+    // we do not allow resampling as such here because it complicates the interface
+    // and leaves us in an equal 'in-bag error' situation as if sample size was just set
+    // to total size.
+    std::vector<size_t> indices = utils::make_index_range(utils::size(train_data[0]));
+    /* N.B.: outer scope forces thread-pool to finish - important!!!
+     without this we can proceed onto the importance stuff BEFORE we have
+     any results, so this MUST be closed off.*/
+    std::vector<threading::SharedResourceWrapper<Accumulator>>
+        accumulators(train_data.size() + 1);
+    /* N.B.: outer scope forces thread-pool to finish - important!!!
+ without this we can proceed onto the importance stuff BEFORE we have
+ any results, so this MUST be closed off.*/
+    {
+      threading::ThreadPool pool(actual_num_threads);
+      for (size_t i = 0; i < n_tree; ++i) {
+        const auto seed = rng();
+        pool.enqueue([this, &train_data, &accumulators, &metric, &indices,
+                      &nosplit_features, seed, bootstrap_size, oob] {
+          RNG rng_(seed);
+          TreeType tree(maxDepth, minNodesize, rng_, terminalNodeFunc,
+                        strategy);
+          std::vector<size_t> train_indices, test_indices;
+          if (oob) {
+            std::tie(train_indices, test_indices) =
+                treeson::utils::bootstrap_two_samples(indices, bootstrap_size,
+                                                      rng_);
+          } else {
+            train_indices =
+                treeson::utils::bootstrap_sample(indices, bootstrap_size, rng_);
+            test_indices = train_indices;
+          }
+          tree.fit(train_data, train_indices, nosplit_features);
+          if (tree.is_uninformative()) {
+            // make it clear that this tree does not count
+            return;
+          }
+          auto used_features = tree.used_features();
+          // compute baseline - update first accumulator
+          accumulators[0](tree.eval_oob(train_data, test_indices, metric));
+          // update all other accumulators
+          for (const auto feature : used_features) {
+            accumulators[feature + 1](tree.eval_oob(
+                train_data, test_indices, feature, metric));
+          }
+        });
+      }
+    }
+    // convert from accumulator values to importances
+    Importance importance_;
+    // whatever the invocation over two accumulators produces :)
+    std::vector<decltype(importance_(accumulators.front().resource.result(),
+                                     accumulators.front().resource.result())
+                             )> importances(accumulators.size()-1);
+    const auto baseline_results = accumulators.front().resource.result();
+    for (size_t feature_i = 0; feature_i < accumulators.size()-1; feature_i++) {
+      importances[feature_i] = importance_(
+          baseline_results, accumulators[feature_i+1].resource.result());
+    }
+    return importances;
+  }
+  // Feature importance method - importance vs global
+  template<typename Accumulator, typename Metric, typename Importance>
+  [[maybe_unused]] auto feature_importance_contrast_st(
+      Metric& metric,
+      const std::vector<FeatureData> &train_data,
+      const size_t n_tree,
+      const std::vector<size_t> &nosplit_features,
+      const bool oob,
+      const size_t bootstrap_size) {
+    // we do not allow resampling as such here because it complicates the interface
+    // and leaves us in an equal 'in-bag error' situation as if sample size was just set
+    // to total size.
+    std::vector<size_t> indices = utils::make_index_range(utils::size(train_data[0]));
+    /* N.B.: outer scope forces thread-pool to finish - important!!!
+     without this we can proceed onto the importance stuff BEFORE we have
+     any results, so this MUST be closed off.*/
+    std::vector<Accumulator> accumulators(train_data.size() + 1);
+    /* N.B.: outer scope forces thread-pool to finish - important!!!
+    without this we can proceed onto the importance stuff BEFORE we have
+    any results, so this MUST be closed off.*/
+    {
+      for (size_t i = 0; i < n_tree; ++i) {
+        TreeType tree(maxDepth, minNodesize, rng, terminalNodeFunc,
+                      strategy);
+        std::vector<size_t> train_indices, test_indices;
+        if (oob) {
+          std::tie(train_indices, test_indices) =
+              treeson::utils::bootstrap_two_samples(indices, bootstrap_size,
+                                                    rng);
+        } else {
+          train_indices =
+              treeson::utils::bootstrap_sample(indices, bootstrap_size, rng);
+          test_indices = train_indices;
+        }
+        tree.fit(train_data, train_indices, nosplit_features);
+        if (tree.is_uninformative()) {
+          // make it clear that this tree does not count
+          continue;
+        }
+        auto used_features = tree.used_features();
+        const auto& res = tree.eval_oob(train_data, test_indices, metric);
+        // compute baseline - update first accumulator
+        accumulators[0](res);
+        // update all other accumulators for which this is pertinent
+        for (const auto feature : used_features) {
+          accumulators[feature + 1](res);
+        }
+      }
+    }
+    // convert from accumulator values to importances
+    Importance importance_;
+    std::vector<decltype(importance_(accumulators.front().result(),
+                                     accumulators.front().result())
+                             )> importances(accumulators.size()-1);
+    const auto baseline_results = accumulators.front().result();
+    for (size_t feature_i = 0; feature_i < accumulators.size()-1; feature_i++) {
+      importances[feature_i] = importance_(
+          baseline_results, accumulators[feature_i+1].result());
+    }
+    return importances;
+  }
+  template<typename Accumulator, typename Metric, typename Importance>
+  [[maybe_unused]] auto feature_importance_contrast_mt(
+      Metric& metric,
+      const std::vector<FeatureData> &train_data,
+      const size_t n_tree,
+      const std::vector<size_t> &nosplit_features,
+      const bool oob = true,
+      const size_t bootstrap_size = 0,
+      const size_t actual_num_threads = 0) {
+    // we do not allow resampling as such here because it complicates the interface
+    // and leaves us in an equal 'in-bag error' situation as if sample size was just set
+    // to total size.
+    std::vector<size_t> indices = utils::make_index_range(utils::size(train_data[0]));
+    /* N.B.: outer scope forces thread-pool to finish - important!!!
+     without this we can proceed onto the importance stuff BEFORE we have
+     any results, so this MUST be closed off.*/
+    std::vector<threading::SharedResourceWrapper<Accumulator>>
+        accumulators(train_data.size() + 1);
+    /* N.B.: outer scope forces thread-pool to finish - important!!!
+ without this we can proceed onto the importance stuff BEFORE we have
+ any results, so this MUST be closed off.*/
+    {
+      threading::ThreadPool pool(actual_num_threads);
+      for (size_t i = 0; i < n_tree; ++i) {
+        const auto seed = rng();
+        pool.enqueue([this, &train_data, &accumulators, &metric, &indices,
+                      &nosplit_features, seed, bootstrap_size, oob] {
+          RNG rng_(seed);
+          TreeType tree(maxDepth, minNodesize, rng_, terminalNodeFunc,
+                        strategy);
+          std::vector<size_t> train_indices, test_indices;
+          if (oob) {
+            std::tie(train_indices, test_indices) =
+                treeson::utils::bootstrap_two_samples(indices, bootstrap_size,
+                                                      rng_);
+          } else {
+            train_indices =
+                treeson::utils::bootstrap_sample(indices, bootstrap_size, rng_);
+            test_indices = train_indices;
+          }
+          tree.fit(train_data, train_indices, nosplit_features);
+          if (tree.is_uninformative()) {
+            // make it clear that this tree does not count
+            return;
+          }
+          auto used_features = tree.used_features();
+          const auto& res = tree.eval_oob(train_data, test_indices, metric);
+          // compute baseline - update first accumulator
+          accumulators[0](res);
+          // update all other accumulators
+          for (const auto feature : used_features) {
+            accumulators[feature + 1](res);
+          }
+        });
+      }
+    }
+    // convert from accumulator values to importances
+    Importance importance_;
+    // whatever the invocation over two accumulators produces :)
+    std::vector<decltype(importance_(accumulators.front().resource.result(),
+                                     accumulators.front().resource.result())
+                             )> importances(accumulators.size()-1);
+    const auto baseline_results = accumulators.front().resource.result();
+    for (size_t feature_i = 0; feature_i < accumulators.size()-1; feature_i++) {
+      importances[feature_i] = importance_(
+          baseline_results, accumulators[feature_i+1].resource.result());
+    }
+    return importances;
+  }
   const size_t maxDepth, minNodesize;
   RNG& rng;
   ResultF& terminalNodeFunc;
@@ -2393,6 +3326,31 @@ std::vector<containers::TreePredictionResult<ResultType>> predict_from_file_mt(
   std::vector<TreeType> trees;
 };
 /*
+template <typename ResultF, typename RNG, typename SplitStrategy,
+          typename Reinforcer, const size_t MaxCategoricalSet = 32,
+          typename scalar_t = double, typename integral_t = size_t>
+class [[maybe_unused]] ReinforcementForest {
+  using FeatureData = std::variant<std::vector<integral_t>, std::vector<scalar_t>>;
+  using TreeType = RandomTree<ResultF, RNG, SplitStrategy, MaxCategoricalSet,
+                              scalar_t, integral_t>;
+  using ResultType = decltype(std::declval<ResultF>()(
+      std::declval<std::vector<size_t> &>(), std::declval<size_t>(),
+      std::declval<size_t>(),
+      std::declval<const std::vector<FeatureData> &>()));
+  const size_t maxDepth, minNodesize;
+  RNG& rng;
+  ResultF& terminalNodeFunc;
+  SplitStrategy& strategy;
+  std::vector<TreeType> trees;
+public:
+  [[maybe_unused]] ReinforcementForest(const size_t maxDepth,
+                                       const size_t minNodesize,
+                                       RNG& rng,
+                                       ResultF &terminalNodeFunc,
+                                       SplitStrategy &strategy) :
+  maxDepth(maxDepth), minNodesize(minNodesize), rng(rng),
+  terminalNodeFunc(terminalNodeFunc), strategy(strategy) {}
+};
 // TODO(JSzitas): first implementation of gradient boosting,
 // actually should also enable https://arxiv.org/pdf/2407.02279
 template <typename TreeType>
