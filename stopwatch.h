@@ -10,7 +10,7 @@
  * the constructor, and when the block finishes it will be automatically 
  * cleaned up (and that will give you the timing). 
  */
-template <typename Resolution = std::chrono::duration<double,std::micro>>
+template <typename Resolution = std::chrono::duration<double, std::milli>>//std::micro>>
 class Stopwatch {
   typedef std::chrono::steady_clock Clock;
 private:
@@ -26,7 +26,7 @@ public:
     return Resolution(Clock::now() - last).count();
   }
   ~Stopwatch() {
-    std::cout << "This code took: " << (*this)() * 1e-6 << " seconds.\n";
+    std::cout << "This code took: " << (*this)() * 1e-3 << " seconds.\n";
   }
 };
 

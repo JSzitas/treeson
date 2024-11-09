@@ -1,0 +1,9 @@
+pyproject.toml
+setup.py
+src/bindings.cpp
+treeson.egg-info/PKG-INFO
+treeson.egg-info/SOURCES.txt
+treeson.egg-info/dependency_links.txt
+treeson.egg-info/not-zip-safe
+treeson.egg-info/requires.txt
+treeson.egg-info/top_level.txt

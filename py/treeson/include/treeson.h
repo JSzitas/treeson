@@ -19,9 +19,6 @@
 #include <queue>
 
 namespace treeson {
-
-static constexpr size_t MAX_PERMISSIBLE_DEPTH = 50;
-
 namespace utils {
 // Helper function to check if a type is a container
 template <typename T, typename _ = void>
@@ -665,17 +662,9 @@ public:
            data.begin() + size;
   }
   void add(const integral_t value) noexcept {
-    if (size < MaxCategoricalSet && !contains(value)) {
+    if (size < MaxCategoricalSet) {
       data[size++] = value;
     }
-  }
-  using iterator = integral_t*;
-  using const_iterator = const integral_t*;
-  iterator begin() {
-    return data.data();
-  }
-  [[nodiscard]] const_iterator begin() const {
-    return data.data();
   }
   void serialize(std::ostream& os) const {
     os.write(reinterpret_cast<const char*>(&size), sizeof(size));
@@ -1007,111 +996,6 @@ struct [[maybe_unused]] LandmarkSampler<size_t, scalar_t, MaxLandmarks>{
     return i;
   }
 };
-template<typename scalar_t, const size_t MaxLandmarks, const size_t MaxHistorySize = 20>
-struct [[maybe_unused]] ReversibleLandmarkSampler {
-  // Current weights
-  std::vector<scalar_t> weights;
-  treeson::containers::ShortVector<size_t, MaxLandmarks> landmarks_id = {};
-
-  // History buffers for weights and landmarks
-  std::array<
-      treeson::containers::ShortVector<scalar_t, MaxLandmarks>,
-      MaxHistorySize> landmarks_history = {};
-  std::array<std::pair<size_t, scalar_t>,
-             MaxHistorySize> weight_changes_history = {};
-  size_t current_history_index = 0;
-
-  // Constructor
-  [[maybe_unused]] explicit ReversibleLandmarkSampler(std::vector<scalar_t>&& weights)
-      : weights(std::move(weights)), current_history_index(size_t(0)),
-        landmarks_history(), weight_changes_history(), landmarks_id() {
-    initialize_landmarks();
-  }
-
-  // Initialize landmarks based on weights
-  void initialize_landmarks() {
-    scalar_t cumulative_weight = 0.0;
-    size_t landmark_index = 0;
-    const size_t n = weights.size();
-    const size_t n_landmarks = std::floor(std::log2(static_cast<float>(n))) + 1;
-
-    if (n_landmarks > landmarks_id.size()) {
-      landmarks_id.resize(n_landmarks);
-      for (auto& lh : landmarks_history) {
-        lh.resize(n_landmarks);
-      }
-    }
-    size_t step_size = n / n_landmarks;
-    for (size_t i = 0; i < weights.size(); ++i) {
-      cumulative_weight += weights[i];
-      if (i % step_size == 0 && (landmark_index + 1) < n_landmarks) {
-        landmarks_id[landmark_index] = i;
-        landmarks_history[current_history_index][landmark_index++] = cumulative_weight;
-      }
-    }
-
-    // Ensure the last position is included as a landmark
-    landmarks_id[landmark_index] = n - 1;
-    landmarks_history[current_history_index][landmark_index] = cumulative_weight;
-  }
-  // potentially lazy updating until sampler called again?
-  [[maybe_unused]] void update(const size_t index, const scalar_t new_weight) {
-    const auto weight_diff = new_weight - weights[index];
-    weights[index] = new_weight;
-    // Record change
-    weight_changes_history[current_history_index] = std::pair<size_t, scalar_t>(index, weight_diff);
-    const auto prev_history_index = current_history_index;
-    // update current history index
-    current_history_index = (current_history_index + 1) % MaxHistorySize;
-    // Update landmarks
-    for (size_t i = 0; i < landmarks_id.size(); ++i) {
-      if(landmarks_id[i] < index) {
-        // the same as current history
-        landmarks_history[current_history_index][i] = landmarks_history[prev_history_index][i];
-      }
-      else {
-        landmarks_history[current_history_index][i] = landmarks_history[prev_history_index][i] + weight_diff;
-      }
-    }
-  }
-  template<typename RNG>
-  [[maybe_unused]] size_t sample(RNG& rng) {
-    auto& current_landmarks = landmarks_history[current_history_index];
-    std::uniform_real_distribution<scalar_t> dist(0.0, current_landmarks.back());
-    scalar_t smpl = dist(rng);
-
-    if (current_landmarks.front() > smpl) return 0;
-
-    size_t i = 1;
-    for (; i < landmarks_id.size(); i++) {
-      if (current_landmarks[i] > smpl) break;
-    }
-
-    scalar_t cumulative_weight = current_landmarks[i - 1];
-    i = landmarks_id[i - 1];
-    while (cumulative_weight <= smpl) {
-      cumulative_weight += weights[++i];
-    }
-
-    return i;
-  }
-  void revert(const size_t steps_back) {
-    // shouldn't overflow hopefully
-    size_t target_index = (current_history_index + MaxHistorySize - steps_back) % MaxHistorySize;
-    current_history_index = target_index;
-    for (size_t i = 0; i < steps_back; ++i) {
-      size_t index = (target_index + i) % MaxHistorySize;
-      const auto [id,change] = weight_changes_history[index];
-      weights[id] -= change;
-    }
-  }
-  [[maybe_unused]] const auto& get_current_landmarks() const {
-    return landmarks_history[current_history_index];
-  }
-  auto weight_volume() const {
-    return landmarks_history[current_history_index].back();
-  }
-};
 }
 namespace serializers{
 template <typename T>
@@ -1283,27 +1167,27 @@ template<typename scalar_t, typename integral_t, const size_t MaxCategoricalSet,
           typename RNG>
 struct MondrianFeatureVisitor {
   using CatSet = containers::FixedCategoricalSet<MaxCategoricalSet, integral_t>;
-  using Restriction = std::variant<std::pair<scalar_t, scalar_t>,
-                                   std::pair<size_t, size_t>>;
+  containers::Node<scalar_t, integral_t, MaxCategoricalSet>& node;
   using Range = std::variant<std::pair<scalar_t, scalar_t>, CatSet>;
-  //containers::Node<scalar_t, integral_t, MaxCategoricalSet>& node;
   std::vector<Range>& global_ranges;
   const size_t feature;
   RNG& rng;
-  std::tuple<bool, std::variant<scalar_t, CatSet>, Restriction>
+  std::pair<scalar_t, scalar_t>
   operator()(const std::pair<scalar_t,scalar_t> &x) const noexcept {
-    const auto threshold = selectRandomThreshold(
-        x.first, x.second);
-    return {selectMIADirection(), threshold.second, threshold};
+    const auto threshold = selectRandomThreshold(x.first, x.second);
+    node.featureIndex = feature;
+    node.threshold = threshold.second;
+    node.missing_goes_right = selectMIADirection();
+    return threshold;
   }
-  std::tuple<bool, std::variant<scalar_t, CatSet>, Restriction>
-      operator()(const std::pair<size_t,size_t> &x) const noexcept {
-    const auto categoricalSet = selectRandomCategoricalSet(
-        x.first, x.second);
-    return {selectMIADirection(), categoricalSet,
-            std::pair<size_t, size_t>(x.first, categoricalSet.size)};
+  std::pair<size_t, size_t>
+  operator()(const std::pair<size_t,size_t> &x) const noexcept {
+    const auto categoricalSet = selectRandomCategoricalSet(x.first, x.second);
+    node.featureIndex = feature;
+    node.threshold = categoricalSet;
+    node.missing_goes_right = selectMIADirection();
+    return {x.first, categoricalSet.size};
   }
-private:
   std::pair<scalar_t,scalar_t> selectRandomThreshold(
       const scalar_t min_, const scalar_t max_) const noexcept {
     std::uniform_real_distribution<scalar_t> dist(min_, max_);
@@ -1314,9 +1198,7 @@ private:
     return std::bernoulli_distribution(0.5)(rng);
   }
   CatSet selectRandomCategoricalSet(const size_t start, const size_t end) const noexcept {
-    auto& curr_set = std::get<
-        containers::FixedCategoricalSet<MaxCategoricalSet, integral_t>>(
-        global_ranges[feature]);
+    auto& curr_set = global_ranges[feature];
     const size_t n_selected = utils::select_from_range(end-start, rng);
     std::shuffle(curr_set.begin() + start, curr_set.begin() + end, rng);
     containers::FixedCategoricalSet<MaxCategoricalSet, integral_t> categoricalSet;
@@ -1351,7 +1233,7 @@ template <typename RNG, typename scalar_t = double,
           typename integral_t = size_t,
           const size_t MaxCategoricalSet = 10>
 class [[maybe_unused]] MondrianStrategy {
-  std::exponential_distribution<scalar_t> exp_dist = std::exponential_distribution<scalar_t>(1.);
+  static std::exponential_distribution<scalar_t> exp_dist = std::exponential_distribution<scalar_t>(1.);
   using CatSet = containers::FixedCategoricalSet<MaxCategoricalSet, integral_t>;
   using Range = std::variant<std::pair<scalar_t, scalar_t>, CatSet>;
   using Restriction = std::variant<std::pair<scalar_t, scalar_t>, std::pair<size_t, size_t>>;
@@ -1368,21 +1250,20 @@ class [[maybe_unused]] MondrianStrategy {
   // keep track of first update for offline learning; only do the update once then
   bool first = true;
   containers::ShortVector<scalar_t, 1024> splitting_times;
-  // assumes max depth 50
-  samplers::ReversibleLandmarkSampler<scalar_t, 100,
-                                      MAX_PERMISSIBLE_DEPTH> sampler;
-  containers::ShortVector<std::pair<size_t, Restriction>,
-      MAX_PERMISSIBLE_DEPTH> range_restriction;
+  samplers::LandmarkSampler<size_t, scalar_t, 100> sampler;
   std::vector<size_t> feats;
+  std::vector<scalar_t> weight_diffs;
+  std::vector<std::pair<size_t, Restriction>> range_restriction;
+  // be a short vector
   size_t previous_depth = 0;
   struct RangeSizeVisitor{
-    scalar_t operator()(const std::pair<size_t, size_t>&x) {
+    scalar_t operator()(std::pair<size_t, size_t>&x) {
       return static_cast<scalar_t>(x.second - x.first);
     }
-    scalar_t operator()(const std::pair<scalar_t, scalar_t>&x){
+    scalar_t operator()(std::pair<scalar_t, scalar_t>&x){
       return x.second - x.first;
     }
-    scalar_t operator()(const CatSet&x){
+    scalar_t operator()(CatSet&x){
       return static_cast<scalar_t>(x.size);
     }
   };
@@ -1390,11 +1271,11 @@ public:
   [[maybe_unused]] explicit MondrianStrategy(
       const scalar_t lambda, const std::vector<size_t>& available_features) :
     lambda(lambda), feats(available_features),
-    sampler(samplers::ReversibleLandmarkSampler<scalar_t, 100, MAX_PERMISSIBLE_DEPTH>(
+    weight_diffs(std::vector<size_t>(1,0)),
+    sampler(samplers::LandmarkSampler<size_t, scalar_t, 100>(
       std::move(std::vector<scalar_t>(available_features.size(), 1.)))) {
     splitting_times.push_back(0.);
-    range_restriction = containers::ShortVector<std::pair<size_t, Restriction>,
-                                                MAX_PERMISSIBLE_DEPTH>();
+    range_restriction = std::vector<std::pair<size_t, Restriction>>();
   }
   bool select_split(
       const std::vector<
@@ -1403,7 +1284,8 @@ public:
       std::vector<size_t> &indices,
       const std::vector<size_t> &available_features, size_t start, size_t end,
       containers::Node<scalar_t, integral_t, MaxCategoricalSet> &node,
-      RNG &rng, const size_t parent_index, const size_t current_depth) {
+      RNG &rng, const size_t node_index, const size_t parent_index,
+      const size_t current_depth) {
     // assumes offline, or that at least a batch is ready before using this
     if(first) {
       for(const auto& feat : feats) {
@@ -1412,66 +1294,66 @@ public:
       }
       // initialize landmark sampler
       std::vector<scalar_t> weights(global_ranges.size(), 1.);
-      sampler = samplers::ReversibleLandmarkSampler<scalar_t, 100, MAX_PERMISSIBLE_DEPTH>(std::move(weights));
+      sampler = samplers::LandmarkSampler<size_t, scalar_t, 100>(std::move(weights));
       first = false;
     }
+    scalar_t total_volume = global_ranges.size() - weight_diffs[current_depth];
     // sample from exponential/size
-    const scalar_t E = exp_dist(rng)/sampler.weight_volume();
+    const scalar_t E = exp_dist(rng)/total_volume;
     // check if greater than splitting time limit, if not return false
     if(splitting_times[parent_index] + E <= lambda) {
       // if we backtracked before getting here we need to undo some of the weight changes
-      if(current_depth < previous_depth) {
-        // revert sampler history :)
-        // TODO(JSzitas): check that the reversal is actually correct
-        sampler.revert(previous_depth-current_depth);
-      }
+      /*if(current_depth < previous_depth) {
+        //containers::FixedSizeMap<size_t, scalar_t, >
+        for(size_t i = previous_depth; i > current_depth; i--) {
+          // iterate over the same feature until the first cut in this subtree is found
+          //sampler.update_weight(range_restriction[i].first, range_restriction[i].second);
+
+        }
+      }*/
+      // apply weight changes from range restrictions - brute force, but should work
+
+
+
       // this is actually weighed sampling
       const size_t feature = sampler.sample(rng);
-      node.featureIndex = feature;
       // total range
       scalar_t range_difference;
       splitting_times.push_back(splitting_times[parent_index] + E);
+      // TODO(Jszitas): careful, this underflows for depth 0
       // when overwriting restrictions push back is wrong
       // this traverses backwards over previous depths
       Restriction new_range_restriction;
-      const auto& global_range = std::visit([&](auto &&arg) ->
-                                     std::variant<std::pair<size_t, size_t>,
-                                                  std::pair<scalar_t, scalar_t>> {
-                                       using T = std::decay_t<decltype(arg)>;
-                                       if constexpr (std::is_same_v<T, CatSet>) {
-                                         return std::pair<size_t, size_t>(0, arg.size);
-                                       } else if constexpr (std::is_same_v<T, std::pair<scalar_t, scalar_t>>) {
-                                         return arg;
-                                       }
-                                     }, global_ranges[feature]);
-      bool found = false;
       for(size_t i = current_depth; i > 0; i--) {
         // find previous range restriction, if any, from the back
         if(range_restriction[i-1].first == feature) {
           const auto prev = range_restriction[i-1].second;
-          std::tuple<bool, std::variant<scalar_t, CatSet>, Restriction> res =
-              std::visit(MondrianFeatureVisitor<
-                  scalar_t, integral_t, MaxCategoricalSet, RNG>{
-                   global_ranges, feature, rng}, prev);
-          node.missing_goes_right = std::get<bool>(res);
-          node.threshold = std::get<std::variant<scalar_t, CatSet>>(res);
-          new_range_restriction = std::get<Restriction>(res);
-          found = true;
+          new_range_restriction =
+              std::visit(MondrianFeatureVisitor{node, global_ranges, feature, rng}, prev);
+          // how much did this range change from before?
+          range_difference = std::visit(RangeSizeVisitor{}, prev) -
+                  std::visit(RangeSizeVisitor{}, new_range_restriction);
           break;
         }
       }
-      if(!found) {
-        std::tuple<bool, std::variant<scalar_t, CatSet>, Restriction> res =
-            std::visit(MondrianFeatureVisitor<
-                scalar_t,integral_t, MaxCategoricalSet, RNG>{
-                           global_ranges, feature, rng},
-                   global_range);
-        node.missing_goes_right = std::get<bool>(res);
-        node.threshold = std::get<std::variant<scalar_t, CatSet>>(res);
-        new_range_restriction = std::get<Restriction>(res);
+      if(not std::holds_alternative<std::pair<scalar_t,scalar_t>>(new_range_restriction) and
+         not std::holds_alternative<std::pair<size_t,size_t>>(new_range_restriction)) {
+        new_range_restriction =
+            std::visit(MondrianFeatureVisitor{node, global_ranges, feature, rng},
+                       std::visit([&](auto &&arg) ->
+                                  std::variant<std::pair<size_t, size_t>,
+                                               std::pair<scalar_t, scalar_t>> {
+                                    using T = std::decay_t<decltype(arg)>;
+                                    if constexpr (std::is_same_v<T, CatSet>) {
+                                      return std::pair<size_t, size_t>(0, arg.size);
+                                    } else if constexpr (std::is_same_v<T, std::pair<scalar_t, scalar_t>>) {
+                                      return arg;
+                                    }
+                                  }, global_ranges[feature]));
+        range_difference = std::visit(RangeSizeVisitor{}, global_ranges[feature]) -
+                std::visit(RangeSizeVisitor{}, new_range_restriction);
+        // this should be new / total, actually
       }
-      const auto new_range_size = std::visit(RangeSizeVisitor{}, new_range_restriction);
-      scalar_t new_weight = new_range_size/std::visit(RangeSizeVisitor{}, global_range);
       // add range restriction to range restrictions
       if(current_depth > range_restriction.size()) {
         range_restriction.push_back(std::pair(feature, new_range_restriction));
@@ -1479,8 +1361,15 @@ public:
         range_restriction[current_depth] =
             std::pair(feature, new_range_restriction);
       }
-      // sampler requires update adjusting for current weight - this is size/total
-      sampler.update(feature, new_weight);
+      // updates - cummulative size, weights
+      if(current_depth > weight_diffs.size()) {
+        weight_diffs.push_back(range_difference);
+      } else {
+        weight_diffs[current_depth] = range_difference;
+      }
+
+      //sampler.update_weight(feature, new_weight);
+
       previous_depth = current_depth;
       return true;
     }
@@ -1511,6 +1400,16 @@ private:
                           }
                           return std::pair<scalar_t, scalar_t>(min,max);
                         }}, data);
+  }
+  scalar_t to_size(
+      const std::variant<std::pair<scalar_t, scalar_t>, CatSet>& space) const {
+    return std::visit([](auto&& arg) -> scalar_t {
+      using T = std::decay_t<decltype(arg)>;
+      if constexpr (std::is_same_v<T, std::pair<scalar_t, scalar_t>>) {
+        return arg.second - arg.first;
+      } else if constexpr (std::is_same_v<T, CatSet>) {
+        return static_cast<scalar_t>(arg.size);
+      }}, space);
   }
 };
 template <typename RNG, typename scalar_t = double,
@@ -1801,25 +1700,16 @@ class RandomTree {
   std::vector<ResultType> terminal_values;
   SplitStrategy &split_strategy;
   bool preallocated = false;
-#pragma clang diagnostic push
-#pragma clang diagnostic ignored "-Wunused-private-field"
   [[maybe_unused]] Embedder embedder;
-#pragma clang diagnostic pop
 public:
   [[maybe_unused]] RandomTree(const size_t maxDepth,
                               const size_t minNodesize,
                               RNG &rng,
                               ResultF &terminalNodeFunc,
-                              SplitStrategy &strategy)
+                              SplitStrategy &strategy) noexcept
       : maxDepth(maxDepth), minNodesize(minNodesize), rng(rng),
         terminalNodeFunc(terminalNodeFunc), split_strategy(strategy),
         embedder(Embedder()) {
-    if(maxDepth > MAX_PERMISSIBLE_DEPTH) {
-      throw std::invalid_argument("Maximum depth specified over limit, specified: "
-                                  + std::to_string(maxDepth) +
-                                  " maximum permissible: " +
-                                  std::to_string(MAX_PERMISSIBLE_DEPTH));
-    }
     nodes.reserve(static_cast<size_t>(std::pow(2, maxDepth + 1) - 1));
     terminal_values = std::vector<ResultType>{};
   }
@@ -2079,16 +1969,21 @@ public:
             const std::vector<size_t> &, size_t, size_t,
             containers::Node<scalar_t, integral_t, MaxCategoricalSet> &, RNG &,
             size_t, size_t>) {
+      // re-travel tree path and collect cut features
+      containers::ShortVector<size_t, 32> pathway{};
+      travel(0, data, indices, start, pathway);
       const bool did_split =
           split_strategy.select_split(data, indices, available_features, start, end,
-                                      nodes[nodeIndex], rng, parentIndex, depth);
+                                      nodes[nodeIndex], rng, nodeIndex, parentIndex, pathway);
       // there possibly an early return if splitting is rejected i.e. in mondrians
       if(!did_split) return;
     }
     size_t mid = reorder_indices(data, nodes[nodeIndex], start, end, indices);
     // if a child node would be too small
-    if (((mid - start) < minNodesize) || ((end - mid) < minNodesize) ||
+    if (((mid - start) <= minNodesize) || ((end - mid) <= minNodesize) ||
         depth >= maxDepth) {
+      //std::cout << "start: "<< start << " mid: "<< mid << " end: "<< end << std::endl;
+      // get rid of last node since it was actually invalid
       terminal_values.push_back(terminalNodeFunc(indices, start, end, data));
       nodes[nodeIndex].assign_terminal(terminal_values.size() - 1);
     } else {
@@ -2460,28 +2355,14 @@ public:
                                 ResultF &terminalNodeFunc,
                                 SplitStrategy &strategy) :
         maxDepth(maxDepth), minNodesize(minNodesize), rng(rng),
-        terminalNodeFunc(terminalNodeFunc), strategy(strategy) {
-    if(maxDepth > MAX_PERMISSIBLE_DEPTH) {
-      throw std::invalid_argument("Maximum depth specified over limit, specified: "
-                                  + std::to_string(maxDepth) +
-                                  " maximum permissible: " +
-                                  std::to_string(MAX_PERMISSIBLE_DEPTH));
-    }
-  }
+        terminalNodeFunc(terminalNodeFunc), strategy(strategy) {}
   [[maybe_unused]] RandomForest(const size_t maxDepth,
                                 const size_t minNodesize,
                                 RNG&& rng,
                                 ResultF &&terminalNodeFunc,
                                 SplitStrategy &strategy) :
     maxDepth(maxDepth), minNodesize(minNodesize), rng(std::move(rng)),
-    terminalNodeFunc(std::move(terminalNodeFunc)), strategy(std::move(strategy)) {
-    if(maxDepth > MAX_PERMISSIBLE_DEPTH) {
-      throw std::invalid_argument("Maximum depth specified over limit, specified: "
-                                  + std::to_string(maxDepth) +
-                                  " maximum permissible: " +
-                                  std::to_string(MAX_PERMISSIBLE_DEPTH));
-    }
-  }
+    terminalNodeFunc(std::move(terminalNodeFunc)), strategy(std::move(strategy)) {}
   [[maybe_unused]] void fit(const std::vector<FeatureData> &data,
            const size_t n_tree,
            const std::vector<size_t> &nosplit_features,

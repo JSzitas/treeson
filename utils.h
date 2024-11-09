@@ -12,12 +12,11 @@
 #include <random>
 #include <iomanip>
 
-template<typename IntegralType, typename FloatingType>
+template<typename IntegralType, typename FloatingType,
+          typename FeatureData = std::variant<
+              std::vector<IntegralType>, std::vector<FloatingType>>>
 class CSVLoader {
 public:
-  using FeatureData = std::variant<
-      std::vector<IntegralType>, std::vector<FloatingType>>;
-
   template<const bool headers,
            const bool row_names>
   static std::vector<FeatureData> load_data(const std::string& filename,

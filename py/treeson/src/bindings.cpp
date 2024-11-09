@@ -1,12 +1,13 @@
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
-#include "../../../rf_multitarget.h"
+
+#include "rf_multitarget.h"
 
 namespace py = pybind11;
 
-typedef float scalar_t;
-typedef size_t integral_t;
-typedef MultitargetRandomForest<scalar_t, integral_t> MultitargetRandomForest_t;
+using scalar_t = float;
+using integral_t = size_t;
+using MultitargetRandomForest_t = MultitargetRandomForest<scalar_t, integral_t>;
 
 PYBIND11_MODULE(treeson, m) {
   py::class_<MultitargetRandomForest_t>(m, "MultitargetRandomForest")

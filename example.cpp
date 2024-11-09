@@ -62,8 +62,8 @@ int main() {
   */
   tree.fit(data, indices, std::vector<size_t>{});
   std::cout << "Tree fitted" << std::endl;
-  //tree.print_tree_info();
-  //tree.print_tree_structure();
+  tree.print_tree_info();
+  tree.print_tree_structure();
   tree.print_terminal_node_values();
 
   std::cout << "Trying prediction" << std::endl;

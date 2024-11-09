@@ -33,7 +33,7 @@ int main() {
       return result;
     };
   };
-  using strat = treeson::splitters::ExtremelyRandomizedStrategy<std::mt19937, double, 32>;
+  using strat = treeson::splitters::ExtremelyRandomizedStrategy<std::mt19937, double, int, 32>;
   //auto res_functor = resultFunc();
   auto res_functor = resultFuncMultitargetMean(std::vector<size_t>{4,5});
   auto strat_obj = strat{};

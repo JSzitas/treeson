@@ -26,12 +26,12 @@ int main() {
   using integral_t = int;
   std::cout << "Loading train: ";
   auto train_data =
-      load_parquet_data<integral_t, scalar_t>("test_data/train.parquet");
+      load_parquet_data<integral_t, scalar_t>("../test_data/train.parquet");
       //CSVLoader<int, scalar_t>::load_data<true, false>("test_data/dr_train.csv", 10000);
   std::cout << "Done." << std::endl;
   std::cout << "Loading test: ";
   auto test_data =
-      load_parquet_data<integral_t, scalar_t>("test_data/test.parquet");
+      load_parquet_data<integral_t, scalar_t>("../test_data/test.parquet");
       //CSVLoader<int, scalar_t>::load_data<true, false>("test_data/dr_test.csv", 10000);
   std::cout << "Done." << std::endl;
   const std::vector<size_t> targets = {0,1,2,3};
@@ -53,12 +53,12 @@ int main() {
                                                     importances
                                                     );
   }
-  for(const size_t n_tree : {100, 500, 1'000, 2'000, 5'000, 10'000, 50'000, 10'000}){
+  for(const size_t n_tree : {100, 500, 1'000, 2'000, 5'000, 10'000}){
     {
       Stopwatch sw;
-      std::cout << "N trees: "<< n_tree << std::endl;
+      //std::cout << "N trees: "<< n_tree << std::endl;
       auto res_ = forest.memoryless_predict(train_data, test_data, n_tree, true, 1024);
-      std::cout << "Computing metrics: "<< std::endl;
+      /*std::cout << "Computing metrics: "<< std::endl;
       for(const auto target: targets) {
         const auto res = one_result(res_, target);
         std::cout << "Target: " << target+1 << std::endl;
@@ -79,6 +79,7 @@ int main() {
       CSVWriter<int, scalar_t>::write_data<true, false>("predictions.csv",
                                                          {"target_w", "target_r", "target_g", "target_b"}, {},
                                                          res_);
+                                                         */
     }
   }
   return 0;
