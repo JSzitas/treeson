@@ -16,10 +16,18 @@ PYBIND11_MODULE(treeson, m) {
 
   .def("fit", &MultitargetRandomForest_t::fit, py::arg("data"), py::arg("n_tree"),
   py::arg("resample") = true, py::arg("sample_size") = 0, py::arg("num_threads") = 0)
+  
+  .def("predict", &MultitargetRandomForest_t::predict, py::arg("samples"), py::arg("num_threads") = 0)
 
   .def("feature_importance", &MultitargetRandomForest_t::feature_importance, py::arg("train_data"), py::arg("n_tree"),
   py::arg("resample"), py::arg("subsample_size"))
 
   .def("memoryless_predict", &MultitargetRandomForest_t::memoryless_predict, py::arg("train_data"), py::arg("test_data"),
-  py::arg("n_tree"), py::arg("resample") = true, py::arg("subsample_size") = 1024);
+  py::arg("n_tree"), py::arg("resample") = true, py::arg("subsample_size") = 1024)
+  
+  .def("fit_to_file", &MultitargetRandomForest_t::fit_to_file, py::arg("train_data"),
+  py::arg("n_tree"), py::arg("file"), py::arg("resample") = true, py::arg("subsample_size") = 1024, py::arg("num_threads") = 0)
+  
+  .def("predict_from_file", &MultitargetRandomForest_t::predict_from_file, py::arg("samples"), 
+  py::arg("model_file"), py::arg("num_threads") = 04);
 }

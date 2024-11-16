@@ -1,7 +1,7 @@
 from setuptools import setup
 from setuptools.command.build_ext import build_ext
 from pybind11.setup_helpers import Pybind11Extension
-from pybind11 import get_include
+from pybind11.commands import get_include
 
 
 include_dirs = [

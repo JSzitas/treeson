@@ -2,9 +2,9 @@
 #include <vector>
 #include <variant>
 
-#include "utils.h"
-#include "treeson.h"
-#include "stopwatch.h"
+#include "../utils/utils.h"
+#include "../treeson.h"
+#include "../utils/stopwatch.h"
 
 using DataType = std::vector<std::variant<std::vector<size_t>, std::vector<double>>>;
 

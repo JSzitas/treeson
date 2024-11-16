@@ -3,7 +3,7 @@
 #include <random>
 #include <variant>
 
-#include "treeson.h"
+#include "../treeson.h"
 
 int main() {
   // Simplified pseudocode for testing:

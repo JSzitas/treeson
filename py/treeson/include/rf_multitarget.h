@@ -206,8 +206,9 @@ public:
                             const size_t n_tree,
                             const bool resample = true,
                             const size_t subsample_size = 1024){
+
     MultitargetMeanAccumulator acc(
-        targets_.size(), std::get<std::vector<scalar_t>>(test_data[0]).size());
+        targets_.size(), treeson::utils::size(test_data[0]));
     forest_.memoryless_predict(acc, train_data, test_data, n_tree, targets_,
                                resample, subsample_size);
     return acc.results();
@@ -222,6 +223,22 @@ public:
       const size_t sample_size = 0,
       const size_t num_threads = 0) {
       forest_.fit(data, n_tree, targets_, resample, sample_size, num_threads);
+    }
+    [[maybe_unused]] void fit_to_file(const DataType &data,
+                                      const size_t n_tree,
+                                      const std::string &file,
+                                      const bool resample = true,
+                                      const size_t sample_size = 0,
+                                      const size_t num_threads = 0) {
+      forest_.fit(data, n_tree, targets_, file, resample, sample_size, num_threads);
+    }
+    [[maybe_unused]] auto predict_from_file(const DataType &samples,
+                                            const std::string &model_file,
+                                            const size_t num_threads = 0) {
+      MultitargetMeanAccumulator acc(
+          targets_.size(), treeson::utils::size(samples[0]));
+      forest_.predict(acc, samples, model_file, num_threads);
+      return acc.results();
     }
 };
 #endif // TREESON_RF_MULTITARGET_H

@@ -20,8 +20,6 @@
 
 namespace treeson {
 
-static constexpr size_t MAX_PERMISSIBLE_DEPTH = 50;
-
 namespace utils {
 // Helper function to check if a type is a container
 template <typename T, typename _ = void>
@@ -502,10 +500,6 @@ template<typename T, const auto tag> struct [[maybe_unused]] Tagged {
 };
 }
 namespace containers {
-// TODO(JSzitas): This is the solution to e.g. the max categorical set stuff
-// this will allow you to have safety via dynamic allocs and good performance
-// if the contract on max size is met. :) use this basically everywhere arrays
-// are used rn. eventually
 template<typename T, const size_t ShortSize>
 class [[maybe_unused]] ShortVector {
 private:
@@ -886,7 +880,6 @@ struct [[maybe_unused]] LandmarkSampler{
   std::vector<scalar_t> weights;
   containers::ShortVector<size_t, MaxLandmarks> landmarks_id = {};
   containers::ShortVector<scalar_t, MaxLandmarks> landmarks_val = {};
-  //std::vector<scalar_t> weights;
   [[maybe_unused]] LandmarkSampler(
       std::vector<T>&& vals, std::vector<scalar_t>&& weights) :
         vals(std::move(vals)), weights(std::move(weights)) {
@@ -1007,7 +1000,7 @@ struct [[maybe_unused]] LandmarkSampler<size_t, scalar_t, MaxLandmarks>{
     return i;
   }
 };
-template<typename scalar_t, const size_t MaxLandmarks, const size_t MaxHistorySize = 20>
+template<typename scalar_t, const size_t MaxLandmarks, const size_t MaxHistorySize = 100>
 struct [[maybe_unused]] ReversibleLandmarkSampler {
   // Current weights
   std::vector<scalar_t> weights;
@@ -1331,6 +1324,7 @@ template <typename RNG, typename scalar_t = double,
           const size_t MaxCategoricalSet = 10>
 class [[maybe_unused]] ExtremelyRandomizedStrategy {
 public:
+  static constexpr size_t MAX_DEPTH = 100;
   [[maybe_unused]] void select_split(
       const std::vector<
           std::variant<std::vector<integral_t>, std::vector<scalar_t>>> &data,
@@ -1351,6 +1345,9 @@ template <typename RNG, typename scalar_t = double,
           typename integral_t = size_t,
           const size_t MaxCategoricalSet = 10>
 class [[maybe_unused]] MondrianStrategy {
+public:
+  static constexpr size_t MAX_DEPTH = 100;
+private:
   std::exponential_distribution<scalar_t> exp_dist = std::exponential_distribution<scalar_t>(1.);
   using CatSet = containers::FixedCategoricalSet<MaxCategoricalSet, integral_t>;
   using Range = std::variant<std::pair<scalar_t, scalar_t>, CatSet>;
@@ -1368,11 +1365,8 @@ class [[maybe_unused]] MondrianStrategy {
   // keep track of first update for offline learning; only do the update once then
   bool first = true;
   containers::ShortVector<scalar_t, 1024> splitting_times;
-  // assumes max depth 50
-  samplers::ReversibleLandmarkSampler<scalar_t, 100,
-                                      MAX_PERMISSIBLE_DEPTH> sampler;
-  containers::ShortVector<std::pair<size_t, Restriction>,
-      MAX_PERMISSIBLE_DEPTH> range_restriction;
+  samplers::ReversibleLandmarkSampler<scalar_t, 100, MAX_DEPTH> sampler;
+  containers::ShortVector<std::pair<size_t, Restriction>, MAX_DEPTH> range_restriction;
   std::vector<size_t> feats;
   size_t previous_depth = 0;
   struct RangeSizeVisitor{
@@ -1390,11 +1384,12 @@ public:
   [[maybe_unused]] explicit MondrianStrategy(
       const scalar_t lambda, const std::vector<size_t>& available_features) :
     lambda(lambda), feats(available_features),
-    sampler(samplers::ReversibleLandmarkSampler<scalar_t, 100, MAX_PERMISSIBLE_DEPTH>(
+    // Max depth capped to 100 - third argument
+    sampler(samplers::ReversibleLandmarkSampler<scalar_t, 100, MAX_DEPTH>(
       std::move(std::vector<scalar_t>(available_features.size(), 1.)))) {
     splitting_times.push_back(0.);
     range_restriction = containers::ShortVector<std::pair<size_t, Restriction>,
-                                                MAX_PERMISSIBLE_DEPTH>();
+                                                MAX_DEPTH>();
   }
   bool select_split(
       const std::vector<
@@ -1412,7 +1407,7 @@ public:
       }
       // initialize landmark sampler
       std::vector<scalar_t> weights(global_ranges.size(), 1.);
-      sampler = samplers::ReversibleLandmarkSampler<scalar_t, 100, MAX_PERMISSIBLE_DEPTH>(std::move(weights));
+      sampler = samplers::ReversibleLandmarkSampler<scalar_t, 100, MAX_DEPTH>(std::move(weights));
       first = false;
     }
     // sample from exponential/size
@@ -1672,17 +1667,37 @@ private:
     }
   };
 };
+//TODO: this needs work
+template<typename scalar_t = double,
+         typename integral_t = size_t,
+         const size_t MaxCategoricalSet = 10>
 class [[maybe_unused]] HoeffdingStrategy{
-  /*
-  delta_(delta), max_samples_per_node_(max_samples_per_node)
-                     scalar_t compute_hoeffding_bound(scalar_t range, scalar_t confidence, int n) {
-    return sqrt((range * range * log(1.0 / confidence)) / (2.0 * n));
+  struct RegressionStatistics {
+    scalar_t mean = 0.0, m2 = 0.0;
+    size_t count = 1;
+    void add(const scalar_t value) {
+      const scalar_t delta = value - mean;
+      mean += delta / count;
+      const scalar_t delta2 = value - mean;
+      m2 += delta * delta2;
+      count++;
+    }
+    scalar_t variance() const {
+      return count > 1 ? m2 / (count - 1) : 0.0;
+    }
+  };
+  std::vector<RegressionStatistics> statistics_;
+
+  [[maybe_unused]] HoeffdingStrategy(const scalar_t delta, const size_t max_samples_per_node) :
+  delta_(delta), max_samples_per_node_(max_samples_per_node){}
+  scalar_t compute_hoeffding_bound(const scalar_t range, const scalar_t confidence, const size_t n) {
+    return std::sqrt((range * range * std::log(1.0 / confidence)) / (2.0 * static_cast<scalar_t>(n)));
   }
-  void update_statistics(size_t terminal_index, scalar_t target) {
+  [[maybe_unused]] void update_statistics(const size_t terminal_index, const scalar_t target) {
     auto& stats = statistics_[terminal_index];
     stats.add(target);
   }
-  void attempt_split(containers::Node<scalar_t, integral_t, MaxCategoricalSet>& node,
+  [[maybe_unused]] void attempt_split(containers::Node<scalar_t, integral_t, MaxCategoricalSet>& node,
                      const std::vector<std::vector<scalar_t>>& data_stream) {
     auto& stats = statistics_[node.terminal_index];
 
@@ -1732,7 +1747,6 @@ class [[maybe_unused]] HoeffdingStrategy{
           }
         }
       }
-
       // Use Hoeffding bound to decide whether to split
       scalar_t epsilon = compute_hoeffding_bound(1.0, delta_, stats.count);
       if (best_variance_reduction > epsilon) {
@@ -1740,20 +1754,13 @@ class [[maybe_unused]] HoeffdingStrategy{
         containers::Node<scalar_t, integral_t, MaxCategoricalSet> left, right;
         node.split_feature = best_feature;
         node.threshold = best_split;
-        node.left = nodes_.size();
-        node.right = nodes_.size() + 1;
-        nodes_.push_back(left);
-        nodes_.push_back(right);
-        statistics_.emplace_back(RegressionStatistics());
-        statistics_.emplace_back(RegressionStatistics());
       }
     }
   }
-  scalar_t delta_;
-  size_t max_samples_per_node_;
-   */
+  const scalar_t delta_;
+  const size_t max_samples_per_node_;
 };
-};
+}
 namespace reducers{
 template<typename scalar_t> struct defaultImportanceReducer {
   scalar_t operator()(const std::vector<std::pair<scalar_t, size_t>>& x) {
@@ -1814,11 +1821,12 @@ public:
       : maxDepth(maxDepth), minNodesize(minNodesize), rng(rng),
         terminalNodeFunc(terminalNodeFunc), split_strategy(strategy),
         embedder(Embedder()) {
-    if(maxDepth > MAX_PERMISSIBLE_DEPTH) {
+    // TODO: perhaps consider a better way to handle depth limits?
+    if(maxDepth > strategy.MAX_DEPTH) {
       throw std::invalid_argument("Maximum depth specified over limit, specified: "
                                   + std::to_string(maxDepth) +
                                   " maximum permissible: " +
-                                  std::to_string(MAX_PERMISSIBLE_DEPTH));
+                                  std::to_string(strategy.MAX_DEPTH));
     }
     nodes.reserve(static_cast<size_t>(std::pow(2, maxDepth + 1) - 1));
     terminal_values = std::vector<ResultType>{};
@@ -1879,8 +1887,8 @@ public:
     }
   }
   [[nodiscard]] bool is_uninformative() const noexcept {
-    // consists of only root
-    return nodes.size() == 1;
+    // consists of only root or has no terminal values
+    return (nodes.size() == 1) || (terminal_values.empty());
   }
   template<typename Metric,
            typename Reducer = treeson::reducers::defaultImportanceReducer<scalar_t>>
@@ -2063,6 +2071,7 @@ public:
     } else {
       nodes[parentIndex].right = nodeIndex; // Right child
     }
+    size_t mid;
     if constexpr (std::is_invocable_v<
                       decltype(&SplitStrategy::select_split), SplitStrategy,
                       const std::vector<FeatureData> &, std::vector<size_t> &,
@@ -2082,13 +2091,13 @@ public:
       const bool did_split =
           split_strategy.select_split(data, indices, available_features, start, end,
                                       nodes[nodeIndex], rng, parentIndex, depth);
-      // there possibly an early return if splitting is rejected i.e. in mondrians
-      if(!did_split) return;
+      if(!did_split) goto end_fitting_tree;
     }
-    size_t mid = reorder_indices(data, nodes[nodeIndex], start, end, indices);
+    mid = reorder_indices(data, nodes[nodeIndex], start, end, indices);
     // if a child node would be too small
     if (((mid - start) < minNodesize) || ((end - mid) < minNodesize) ||
         depth >= maxDepth) {
+      end_fitting_tree:
       terminal_values.push_back(terminalNodeFunc(indices, start, end, data));
       nodes[nodeIndex].assign_terminal(terminal_values.size() - 1);
     } else {
@@ -2109,6 +2118,7 @@ public:
     } else {
       nodes[parentIndex].right = nodeIndex; // Right child
     }
+    size_t mid;
     if constexpr (std::is_invocable_v<
         decltype(&SplitStrategy::select_split), SplitStrategy,
         const std::vector<FeatureData> &, std::vector<size_t> &,
@@ -2127,12 +2137,13 @@ public:
           split_strategy.select_split(data, indices, available_features, start, end,
                                       nodes[nodeIndex], rng, nodeIndex, parentIndex);
       // there possibly an early return if splitting is rejected i.e. in mondrians
-      if(!did_split) return;
+      if(!did_split) goto end_building_tree;
     }
-    size_t mid = reorder_indices(data, nodes[nodeIndex], start, end, indices);
+    mid = reorder_indices(data, nodes[nodeIndex], start, end, indices);
     // if a child node would be too small
     if (((mid - start) <= minNodesize) || ((end - mid) <= minNodesize) ||
         depth >= maxDepth) {
+      end_building_tree:
       // get rid of last node since it was actually invalid
       terminal_values[terminal_index++] = terminalNodeFunc(indices, start, end, data);
       nodes[nodeIndex].assign_terminal(terminal_index - 1);
@@ -2221,7 +2232,7 @@ public:
                       std::vector<size_t> &indices, const size_t start, const size_t end,
                       ResultContainer &predictionResult) const noexcept {
     const auto &node = nodes[nodeIndex];
-    if (node.left == 0) {
+    if (node.left == 0 || nodes[nodeIndex].featureIndex > samples.size()) {
       // leaf node
       if constexpr (FlattenResults) {
         const auto &result_container = terminal_values[node.terminal_index];
@@ -2303,145 +2314,6 @@ public:
     return mid;
   }
 };
-  // always uses a mondrian split strategy - requires storing node metadata
-  // possibly a std::optional<stuff> node_metadata; that is used
-  // only when a splitter is invoked that requires/manipulates node metadata
-  // note that any update in mondrian tree only requires updating ranges/sets
-  //
-
-/* TODO(JSzitas): this doesnt actually work right now
-template <typename scalar_t, typename integral_t, const size_t MaxCategoricalSet>
-class HoeffdingTree {
-public:
-  struct RegressionStatistics {
-    scalar_t mean = 0.0, m2 = 0.0;
-    size_t count = 1;
-    void add(scalar_t value) {
-      scalar_t delta = value - mean;
-      mean += delta / count;
-      scalar_t delta2 = value - mean;
-      m2 += delta * delta2;
-      count++;
-    }
-    scalar_t variance() const {
-      return count > 1 ? m2 / (count - 1) : 0.0;
-    }
-  };
-  [[maybe_unused]] HoeffdingTree(const scalar_t delta, const size_t max_samples_per_node)
-      : delta_(delta), max_samples_per_node_(max_samples_per_node),
-    nodes_(std::vector<containers::Node<scalar_t, integral_t, MaxCategoricalSet>>{}),
-    statistics_(std::vector<RegressionStatistics>{}) {}
-  void train(const std::vector<std::vector<scalar_t>>& data_stream) {
-    for (const auto& instance : data_stream) {
-      containers::Node<scalar_t, integral_t, MaxCategoricalSet>& current = nodes_.front();
-      // while not terminal
-      while (!current->is_leaf) {
-        if (instance[current.featureIndex] < std::get<scalar_t>(current.threshold)) {
-          current = nodes_[current.left];
-        } else {
-          current = nodes_[current.right];
-        }
-      }
-      scalar_t target = instance.back();  // Assuming target is the last element
-      update_statistics(current.terminal_index, target);
-      attempt_split(current);
-    }
-  }
-  scalar_t predict(const std::vector<scalar_t>& instance) {
-    containers::Node<scalar_t, integral_t, MaxCategoricalSet>* current = &nodes_.front();
-    while (!current->is_leaf) {
-      if (instance[current->split_feature] < std::get<scalar_t>(current->threshold)) {
-        current = &nodes_[current->left];
-      } else {
-        current = &nodes_[current->right];
-      }
-    }
-
-    // Return the mean of the terminal node's statistics
-    return statistics_[current->terminal_index].mean;
-  }
-private:
-
-  scalar_t compute_hoeffding_bound(scalar_t range, scalar_t confidence, int n) {
-    return sqrt((range * range * log(1.0 / confidence)) / (2.0 * n));
-  }
-  void update_statistics(size_t terminal_index, scalar_t target) {
-    auto& stats = statistics_[terminal_index];
-    stats.add(target);
-  }
-  void attempt_split(containers::Node<scalar_t, integral_t, MaxCategoricalSet>& node,
-                     const std::vector<std::vector<scalar_t>>& data_stream) {
-    auto& stats = statistics_[node.terminal_index];
-
-    // Check if we have enough samples to consider a split
-    if (stats.count >= max_samples_per_node_) {
-      scalar_t best_variance_reduction = 0.0;
-      size_t best_feature = std::numeric_limits<size_t>::max();
-      scalar_t best_split = 0.0;
-
-      for (size_t feature = 0; feature < data_stream[0].size() - 1; ++feature) {
-        // Assuming the last column is the target
-        // Sort instances by the current feature
-        std::vector<std::pair<scalar_t, scalar_t>> feature_target_pairs;
-        for (const auto& instance : data_stream) {
-          feature_target_pairs.emplace_back(instance[feature], instance.back());
-        }
-
-        std::sort(feature_target_pairs.begin(), feature_target_pairs.end());
-
-        // Initialize left and right statistics
-        RegressionStatistics left_stats, right_stats;
-        for (const auto& [feature_value, target_value] : feature_target_pairs) {
-          right_stats.add(target_value);
-        }
-
-        // Evaluate split points between consecutive feature values
-        for (size_t i = 0; i < feature_target_pairs.size() - 1; ++i) {
-          left_stats.add(feature_target_pairs[i].second);
-          right_stats.count--; // Decrement right count
-          right_stats.mean *= right_stats.count / (right_stats.count + 1);
-          scalar_t delta = feature_target_pairs[i].second - right_stats.mean;
-          right_stats.mean += delta / right_stats.count;
-          right_stats.m2 -= delta * (feature_target_pairs[i].second - right_stats.mean);
-
-          if (feature_target_pairs[i].first != feature_target_pairs[i + 1].first) {
-            // Compute variance reduction
-            scalar_t variance_reduction = stats.variance()
-                                        - ((left_stats.count / static_cast<scalar_t>(stats.count)) * left_stats.variance()
-                                           + (right_stats.count / static_cast<scalar_t>(stats.count)) * right_stats.variance());
-
-            // Check if this split is better
-            if (variance_reduction > best_variance_reduction) {
-              best_variance_reduction = variance_reduction;
-              best_feature = feature;
-              best_split = (feature_target_pairs[i].first + feature_target_pairs[i + 1].first) / 2.0;
-            }
-          }
-        }
-      }
-
-      // Use Hoeffding bound to decide whether to split
-      scalar_t epsilon = compute_hoeffding_bound(1.0, delta_, stats.count);
-      if (best_variance_reduction > epsilon) {
-        // Perform the split
-        containers::Node<scalar_t, integral_t, MaxCategoricalSet> left, right;
-        node.split_feature = best_feature;
-        node.threshold = best_split;
-        node.left = nodes_.size();
-        node.right = nodes_.size() + 1;
-        nodes_.push_back(left);
-        nodes_.push_back(right);
-        statistics_.emplace_back(RegressionStatistics());
-        statistics_.emplace_back(RegressionStatistics());
-      }
-    }
-  }
-  scalar_t delta_;
-  size_t max_samples_per_node_;
-  std::vector<containers::Node<scalar_t, integral_t, MaxCategoricalSet>> nodes_;
-  std::vector<RegressionStatistics> statistics_;
-};
-*/
 template <typename ResultF, typename RNG, typename SplitStrategy,
           const size_t MaxCategoricalSet = 32, typename scalar_t = double,
           typename integral_t = size_t>
@@ -2461,11 +2333,11 @@ public:
                                 SplitStrategy &strategy) :
         maxDepth(maxDepth), minNodesize(minNodesize), rng(rng),
         terminalNodeFunc(terminalNodeFunc), strategy(strategy) {
-    if(maxDepth > MAX_PERMISSIBLE_DEPTH) {
+    if(maxDepth > strategy.MAX_DEPTH) {
       throw std::invalid_argument("Maximum depth specified over limit, specified: "
                                   + std::to_string(maxDepth) +
                                   " maximum permissible: " +
-                                  std::to_string(MAX_PERMISSIBLE_DEPTH));
+                                  std::to_string(strategy.MAX_DEPTH));
     }
   }
   [[maybe_unused]] RandomForest(const size_t maxDepth,
@@ -2475,11 +2347,11 @@ public:
                                 SplitStrategy &strategy) :
     maxDepth(maxDepth), minNodesize(minNodesize), rng(std::move(rng)),
     terminalNodeFunc(std::move(terminalNodeFunc)), strategy(std::move(strategy)) {
-    if(maxDepth > MAX_PERMISSIBLE_DEPTH) {
+    if(maxDepth > strategy.MAX_DEPTH) {
       throw std::invalid_argument("Maximum depth specified over limit, specified: "
                                   + std::to_string(maxDepth) +
                                   " maximum permissible: " +
-                                  std::to_string(MAX_PERMISSIBLE_DEPTH));
+                                  std::to_string(strategy.MAX_DEPTH));
     }
   }
   [[maybe_unused]] void fit(const std::vector<FeatureData> &data,
@@ -2564,7 +2436,7 @@ public:
       Accumulator& accumulator,
       const std::vector<FeatureData> &samples,
       const std::string &model_file,
-      const size_t num_threads = 0) const noexcept {
+      const size_t num_threads) const noexcept {
     std::ifstream in(model_file + ".bin", std::ios::binary);
     size_t n;
     in.read(reinterpret_cast<char*>(&n), sizeof(n));
@@ -2573,7 +2445,7 @@ public:
       predict_from_file_acc_st(accumulator, samples, in, n);
       return;
     }
-    return predict_from_file_acc_mt(
+    predict_from_file_acc_mt(
         accumulator, samples, in, n, actual_num_threads);
   }
   template<typename Accumulator>
@@ -2604,13 +2476,30 @@ public:
                           nosplit_features, resample_, bootstrap_size,
                           actual_num_threads);
   }
+  // TODO: test
   [[maybe_unused]] void prune() {
-    trees.erase(
-        std::remove_if(trees.begin(), trees.end(), [](const TreeType &tree) {
-          return tree.is_uninformative();
-        }),
-        trees.end()
-    );
+    size_t i = 0;
+    std::vector<size_t> removable_trees, informative_trees;
+    for(const auto& tree: trees) {
+      if(tree.is_uninformative()) {
+        removable_trees.push_back(i);
+      }
+      else {
+        informative_trees.push_back(i);
+      }
+      i++;
+    }
+    size_t k = informative_trees.size()-1; i = 0;
+    while((removable_trees[i] < informative_trees[k]) &&
+           (k >= 0) && (i < removable_trees.size())) {
+      // swap informative and uninformative trees
+      // removable trees go from front, informative trees from the back.
+      // note that this works since both are, by construction, sorted
+      std::swap(trees[removable_trees[i]], trees[informative_trees[k--]]);
+      i++; k--;
+    }
+    // resize, dropping uninformative trees
+    trees.resize(informative_trees.size());
   }
   enum ImportanceMethod{
     Omit,
@@ -2848,9 +2737,10 @@ private:
   [[nodiscard]] std::vector<containers::TreePredictionResult<ResultType>>
   predict_st(const std::vector<FeatureData> &samples) const noexcept {
     const size_t n = trees.size();
-    std::vector<containers::TreePredictionResult<ResultType>> results(n);
+    std::vector<containers::TreePredictionResult<ResultType>> results;
+    results.reserve(n);
     for (size_t i = 0; i < trees.size(); ++i) {
-      results[i] = trees[i].predict(samples);
+      results.push_back(trees[i].predict(samples));
     }
     return results;
   }
@@ -2858,14 +2748,15 @@ private:
   predict_mt(const std::vector<FeatureData> &samples,
              const size_t actual_num_threads = 1) const noexcept {
     const size_t n = trees.size();
-    std::vector<containers::TreePredictionResult<ResultType>> results(n);
+    std::vector<containers::TreePredictionResult<ResultType>> results;
+    results.reserve(n);
     threading::SharedResourceWrapper<
         std::vector<containers::TreePredictionResult<ResultType>>> results_(results);
     {
       threading::ThreadPool pool(actual_num_threads);
       for (size_t i = 0; i < trees.size(); ++i) {
         pool.enqueue([this, &results_, &samples, i] {
-          results_[i] = trees[i].predict(samples);
+          results_->push_back(trees[i].predict(samples));
         });
       }
     }
@@ -2876,12 +2767,13 @@ std::vector<containers::TreePredictionResult<ResultType>> predict_from_file_st(
     const std::vector<FeatureData> &samples,
       std::ifstream& model_stream,
       const size_t n) const noexcept {
-  std::vector<containers::TreePredictionResult<ResultType>> results(n);
+  std::vector<containers::TreePredictionResult<ResultType>> results;
+  results.reserve(n);
   for (size_t i = 0; i < n; i++) {
     TreeType tree(maxDepth, minNodesize, rng, terminalNodeFunc, strategy);
     auto [nodes, values] = tree.deserialize(model_stream);
     tree.from_nodes(std::move(nodes),std::move(values));
-    results[i] = tree.predict(samples);
+    results.push_back(tree.predict(samples));
   }
   return results;
 }
@@ -2936,9 +2828,9 @@ std::vector<containers::TreePredictionResult<ResultType>> predict_from_file_mt(
     for (size_t i = 0; i < n; i++) {
       pool.enqueue([this, &accumulator_, &samples, &in_] {
         TreeType tree(maxDepth, minNodesize, rng, terminalNodeFunc, strategy);
-        auto [nodes, values] = tree.deserialize(in_);
-        acc_(tree.from_nodes(std::move(nodes),
-                             std::move(values)).predict(samples));
+        auto [nodes, values] = in_.deserialize(tree);
+        tree.from_nodes(std::move(nodes), std::move(values));
+        accumulator_(tree.predict(samples));
       });
     }
   }
@@ -3557,11 +3449,12 @@ std::vector<containers::TreePredictionResult<ResultType>> predict_from_file_mt(
   SplitStrategy& strategy;
   std::vector<TreeType> trees;
 };
-/*
+// TODO(JSzitas): implement gradient boosting
 template <typename ResultF, typename RNG, typename SplitStrategy,
-          typename Reinforcer, const size_t MaxCategoricalSet = 32,
-          typename scalar_t = double, typename integral_t = size_t>
-class [[maybe_unused]] ReinforcementForest {
+          const size_t MaxCategoricalSet = 32, typename scalar_t = double,
+          typename integral_t = size_t>
+class [[maybe_unused]] Treeson {
+public:
   using FeatureData = std::variant<std::vector<integral_t>, std::vector<scalar_t>>;
   using TreeType = RandomTree<ResultF, RNG, SplitStrategy, MaxCategoricalSet,
                               scalar_t, integral_t>;
@@ -3569,43 +3462,28 @@ class [[maybe_unused]] ReinforcementForest {
       std::declval<std::vector<size_t> &>(), std::declval<size_t>(),
       std::declval<size_t>(),
       std::declval<const std::vector<FeatureData> &>()));
-  const size_t maxDepth, minNodesize;
-  RNG& rng;
-  ResultF& terminalNodeFunc;
-  SplitStrategy& strategy;
-  std::vector<TreeType> trees;
-public:
-  [[maybe_unused]] ReinforcementForest(const size_t maxDepth,
-                                       const size_t minNodesize,
-                                       RNG& rng,
-                                       ResultF &terminalNodeFunc,
-                                       SplitStrategy &strategy) :
-  maxDepth(maxDepth), minNodesize(minNodesize), rng(rng),
-  terminalNodeFunc(terminalNodeFunc), strategy(strategy) {}
-};
-// TODO(JSzitas): first implementation of gradient boosting,
-// actually should also enable https://arxiv.org/pdf/2407.02279
-template <typename TreeType>
-class Treeson {
-public:
-  using FeatureData = typename TreeType::FeatureData;
-  using ResultType = typename TreeType::ResultType;
 
-  Treeson(size_t n_estimators, double learning_rate)
+  [[maybe_unused]] Treeson(const size_t n_estimators, const scalar_t learning_rate)
       : n_estimators(n_estimators), learning_rate(learning_rate) {}
 
-  void fit(const std::vector<FeatureData>& data, const std::vector<ResultType>& targets) {
+  [[maybe_unused]] void fit(const std::vector<FeatureData>& data, std::vector<scalar_t> targets) {
+    /*
+    tree.fit(data, indices, std::vector<size_t>{});
+    const auto& predictions = tree.predict(data);
+    */
+
+
     std::vector<ResultType> predictions(targets.size(), 0.0);
     residuals = targets;  // Initialize residuals with actual targets
 
     for (size_t i = 0; i < n_estimators; ++i) {
-      auto tree = std::make_unique<TreeType>();
+      TreeType tree;
 
-      tree->fit(data, residuals);  // Fit tree on residuals
+      tree.fit(data, residuals);  // Fit tree on residuals
       trees.push_back(std::move(tree));
 
       // Update predictions and residuals
-      auto current_predictions = trees.back()->predict(data);
+      auto current_predictions = trees.back().predict(data);
       for (size_t j = 0; j < predictions.size(); ++j) {
         predictions[j] += learning_rate * current_predictions[j];
         residuals[j] = targets[j] - predictions[j];
@@ -3627,11 +3505,10 @@ public:
   }
 
 private:
-  size_t n_estimators;
-  double learning_rate;
-  std::vector<std::unique_ptr<TreeType>> trees;
+  const size_t n_estimators;
+  const scalar_t learning_rate;
+  std::vector<TreeType> trees;
   std::vector<ResultType> residuals;
 };
-*/
 }
 

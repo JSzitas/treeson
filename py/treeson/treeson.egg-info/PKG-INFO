@@ -1,7 +1,0 @@
-Metadata-Version: 2.1
-Name: treeson
-Version: 0.0.1
-Summary: Pybind11 bindings for treeson
-Author: JS
-Author-email: szitas.juraj13@example.com
-Requires-Dist: pybind11>=2.5.0

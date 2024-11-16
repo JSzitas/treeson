@@ -3,12 +3,10 @@
 #include <random>
 #include <variant>
 
-//#include "treeson.h"
-#include "rf_multitarget.h"
-#include "stopwatch.h"
-#include "utils.h"
+#include "../utils/rf_multitarget.h"
+#include "../utils/stopwatch.h"
 
-#include "parquet.h"
+#include "../utils/parquet.h"
 
 template<typename scalar_t> [[nodiscard]]
 auto one_result(const std::vector<std::vector<scalar_t>>& result,
@@ -36,9 +34,10 @@ int main() {
   std::cout << "Done." << std::endl;
   const std::vector<size_t> targets = {0,1,2,3};
   MultitargetRandomForest<scalar_t, integral_t, 0> forest(targets, 10, 12);
-
+  /*
   for(const auto& n_tree: {100}) {//, 500, 1'000, 2'000, 5'000, 10'000, 50'000, 100'000}){
     Stopwatch sw;
+
     std::cout << "Running feature importances, n_tree: " << n_tree << std::endl;
     const auto importances = forest.feature_importance(
         train_data, n_tree, true, 1024);
@@ -52,13 +51,13 @@ int main() {
                                                     {}, {},
                                                     importances
                                                     );
-  }
+  }*/
   for(const size_t n_tree : {100, 500, 1'000, 2'000, 5'000, 10'000}){
     {
       Stopwatch sw;
       //std::cout << "N trees: "<< n_tree << std::endl;
-      auto res_ = forest.memoryless_predict(train_data, test_data, n_tree, true, 1024);
-      /*std::cout << "Computing metrics: "<< std::endl;
+      auto res_ = forest.memoryless_predict(train_data, test_data, n_tree, false);
+      std::cout << "Computing metrics: "<< std::endl;
       for(const auto target: targets) {
         const auto res = one_result(res_, target);
         std::cout << "Target: " << target+1 << std::endl;
@@ -75,11 +74,12 @@ int main() {
                                       res, std::get<std::vector<scalar_t>>(test_data[target])
                                           ) << std::endl;
       }
+      /*
       std::cout << "Writing predictions" << std::endl;
       CSVWriter<int, scalar_t>::write_data<true, false>("predictions.csv",
                                                          {"target_w", "target_r", "target_g", "target_b"}, {},
                                                          res_);
-                                                         */
+                                       */
     }
   }
   return 0;
