@@ -1,3 +1,10 @@
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wunknown-pragmas"
+#pragma once
+
+#ifndef TREESON_H
+#define TREESON_H
+
 #include <iostream>
 #include <vector>
 #include <variant>
@@ -551,7 +558,7 @@ public:
     }
   }
 
-  void push_back(T&& value) {
+  [[maybe_unused]] void push_back(T&& value) {
     if (current_size < ShortSize && !use_vector) {
       std::get<arr>(data)[current_size++] = std::move(value);
     } else {
@@ -1367,7 +1374,6 @@ private:
   containers::ShortVector<scalar_t, 1024> splitting_times;
   samplers::ReversibleLandmarkSampler<scalar_t, 100, MAX_DEPTH> sampler;
   containers::ShortVector<std::pair<size_t, Restriction>, MAX_DEPTH> range_restriction;
-  std::vector<size_t> feats;
   size_t previous_depth = 0;
   struct RangeSizeVisitor{
     scalar_t operator()(const std::pair<size_t, size_t>&x) {
@@ -1383,13 +1389,32 @@ private:
 public:
   [[maybe_unused]] explicit MondrianStrategy(
       const scalar_t lambda, const std::vector<size_t>& available_features) :
-    lambda(lambda), feats(available_features),
+    lambda(lambda),
     // Max depth capped to 100 - third argument
     sampler(samplers::ReversibleLandmarkSampler<scalar_t, 100, MAX_DEPTH>(
-      std::move(std::vector<scalar_t>(available_features.size(), 1.)))) {
+      std::move(std::vector<scalar_t>(1, 1.)))) {
     splitting_times.push_back(0.);
     range_restriction = containers::ShortVector<std::pair<size_t, Restriction>,
                                                 MAX_DEPTH>();
+  }
+  [[maybe_unused]] explicit MondrianStrategy(
+      const scalar_t lambda, const std::vector<size_t>& available_features,
+      const std::vector<std::variant<std::vector<integral_t>,
+          std::vector<scalar_t>>> &data, std::vector<size_t> &indices,
+      size_t start, size_t end) : lambda(lambda) {
+      splitting_times.push_back(0.);
+      range_restriction = containers::ShortVector<std::pair<size_t, Restriction>, MAX_DEPTH>();
+          // assumes offline, or that at least a batch is ready before using this
+      if(first) {
+        for(const auto& feat : available_features) {
+          global_ranges.push_back(
+              data_range_visitor(data[feat], indices, start, end));
+        }
+        // initialize landmark sampler
+        std::vector<scalar_t> weights(global_ranges.size(), 1.);
+        sampler = samplers::ReversibleLandmarkSampler<scalar_t, 100, MAX_DEPTH>(std::move(weights));
+        first = false;
+    }
   }
   bool select_split(
       const std::vector<
@@ -1401,7 +1426,7 @@ public:
       RNG &rng, const size_t parent_index, const size_t current_depth) {
     // assumes offline, or that at least a batch is ready before using this
     if(first) {
-      for(const auto& feat : feats) {
+      for(const auto& feat : available_features) {
         global_ranges.push_back(
             data_range_visitor(data[feat], indices, start, end));
       }
@@ -3512,3 +3537,6 @@ private:
 };
 }
 
+#endif // TREESON_H
+
+#pragma clang diagnostic pop

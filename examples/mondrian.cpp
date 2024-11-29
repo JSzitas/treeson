@@ -30,7 +30,7 @@ int main() {
   using strat = treeson::splitters::MondrianStrategy<
       std::mt19937, scalar_t, integral_t, 32>;
   std::vector<size_t> feats = {0,1,2};
-  auto strat_obj = strat(10., feats);
+  auto strat_obj = strat(1., feats);
   auto res_functor = resultFunc{};
 
   // Creating tree

@@ -1,10 +1,7 @@
 #include <iostream>
 #include <array>
 #include <cmath>
-#include <iomanip>
 
-
-#include "../utils/stopwatch.h"
 #include "../utils/tinyqr.h"
 
 template <typename T> constexpr T cpow(T base, int exp) {
@@ -78,11 +75,9 @@ constexpr T clog(T x, T epsilon = 1e-3, const size_t iter = 100) {
   const T log_scale = exponent * 0.6931472;
   T log_x = crichardson_log(x);
   result = log_scale + log_x;
-  T prev_result = 0.;
   for(size_t i = 0; i < iter; i++) {
     T exp_result = cexp(result);
     if(cabs(exp_result - x_) < epsilon) break;
-    prev_result = result;
     result -= (exp_result - x) / exp_result;
   }
   return result;
@@ -111,7 +106,7 @@ constexpr std::array<double, debias_order+1> get_coeffs() {
   }
   std::array<double, debias_order+1> e0{};
   e0[0] = 1.0;
-  return tinyqr::compile_time::clm<double, debias_order+1, debias_order+1>(A, e0);
+  return tinyqr::clm<double, debias_order+1, debias_order+1>(A, e0);
 }
 
 template <int J>
@@ -127,7 +122,7 @@ get_V_omega_inner() {
   }
   std::array<double, J+1> e0{};
   e0[0] = 1.0;
-  auto coeff = tinyqr::compile_time::clm<double, J+1, J+1>(A, e0);
+  auto coeff = tinyqr::clm<double, J+1, J+1>(A, e0);
   std::array<std::array<double, J + 1>, J + 1> V = {};
   for (int r = 0; r <= J; ++r) {
     for (int s = 0; s <= J; ++s) {
