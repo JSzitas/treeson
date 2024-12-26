@@ -1,3 +1,5 @@
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wunknown-pragmas"
 #pragma once
 
 #ifndef TREESON_H
@@ -108,8 +110,9 @@ template <typename T>
   }
   std::cout << "]" << std::endl;
 }
+template<typename T>
 [[maybe_unused]] void print_vector_of_pairs(
-    const std::vector<std::array<double, 2>>& vec) {
+    const std::vector<std::array<T, 2>>& vec) {
   std::cout << "[";
   for (size_t i = 0; i < vec.size(); ++i) {
     std::cout << "(" << vec[i][0] << ", " << vec[i][1] << ")";
@@ -853,6 +856,9 @@ struct TreePredictionResult {
             results[which_result].second
            };
   }
+  const auto& view_indices() const {
+    return indices;
+  }
   // Expands the result back into the full prediction vector
   [[maybe_unused]] std::vector<ResultType> expand_result() const {
     std::vector<ResultType> expanded_results(indices.size());
@@ -1214,6 +1220,77 @@ struct [[maybe_unused]] HoeffdingEmbedder{
 };
 }
 namespace splitters {
+template<typename scalar_t, typename integral_t, const size_t MaxCategoricalSet>
+size_t reorder_indices(const std::vector<std::variant<
+                           std::vector<integral_t>,
+                           std::vector<scalar_t>>>& data,
+                       const treeson::containers::Node<scalar_t, integral_t, MaxCategoricalSet>& node,
+                       const size_t start, const size_t end, std::vector<size_t>& indices) {
+  auto& featureData = data[node.featureIndex];
+  const auto miss_dir = node.getMIADirection();
+  size_t mid = start;
+  if (node.isCategorical()) {
+    const auto &catSet = node.getCategoricalSet();
+    const auto &catData = std::get<std::vector<integral_t>>(featureData);
+    for (size_t i = start; i < end; ++i) {
+      const auto val = catData[indices[i]];
+      if (catSet.contains(val)) {
+        std::swap(indices[i], indices[mid]);
+        ++mid;
+      }
+    }
+  } else {
+    const auto &numThreshold = node.getNumericThreshold();
+    const auto &numData = std::get<std::vector<scalar_t>>(featureData);
+    for (size_t i = start; i < end; ++i) {
+      const auto val = numData[indices[i]];
+      if ((val <= numThreshold) || (std::isnan(val) && miss_dir)) {
+        std::swap(indices[i], indices[mid]);
+        ++mid;
+      }
+    }
+  }
+  return mid;
+}
+template<typename scalar_t, typename integral_t, const size_t MaxCategoricalSet>
+size_t reorder_indices(
+    const std::vector<std::variant<
+        std::vector<integral_t>,
+        std::vector<scalar_t>>>& data,
+    const size_t feature,
+    bool miss_dir,
+    std::variant<scalar_t,
+                 containers::FixedCategoricalSet<
+                     MaxCategoricalSet, integral_t>> threshold,
+    const size_t start, const size_t end, std::vector<size_t>& indices) {
+  auto& featureData = data[feature];
+  size_t mid = start;
+  if (std::holds_alternative<
+      containers::FixedCategoricalSet<MaxCategoricalSet, integral_t>>(
+          threshold)) {
+    const auto &catSet = std::get<containers::FixedCategoricalSet<
+        MaxCategoricalSet, integral_t>>(threshold);
+    const auto &catData = std::get<std::vector<integral_t>>(featureData);
+    for (size_t i = start; i < end; ++i) {
+      const auto val = catData[indices[i]];
+      if (catSet.contains(val)) {
+        std::swap(indices[i], indices[mid]);
+        ++mid;
+      }
+    }
+  } else {
+    const auto &numThreshold = std::get<scalar_t>(threshold);
+    const auto &numData = std::get<std::vector<scalar_t>>(featureData);
+    for (size_t i = start; i < end; ++i) {
+      const auto val = numData[indices[i]];
+      if ((val <= numThreshold) || (std::isnan(val) && miss_dir)) {
+        std::swap(indices[i], indices[mid]);
+        ++mid;
+      }
+    }
+  }
+  return mid;
+}
 template<typename scalar_t, typename integral_t, const size_t MaxCategoricalSet,
     typename RNG>
 struct RandomFeatureVisitor {
@@ -1344,6 +1421,94 @@ public:
     node.featureIndex = feature;
     node.threshold = threshold;
     node.missing_goes_right = mia_direction;
+  }
+};
+template <typename RNG, typename scalar_t = double,
+          typename integral_t = size_t,
+          const size_t MaxCategoricalSet = 10>
+class [[maybe_unused]] ExtratreesStrategy {
+  using CatSet = containers::FixedCategoricalSet<MaxCategoricalSet, integral_t>;
+  const size_t target;
+  const size_t mtry;
+  const size_t num_splits;
+  scalar_t compute_score(
+      const std::vector<
+          std::variant<std::vector<integral_t>, std::vector<scalar_t>>> &data,
+      std::vector<size_t> &indices,
+      size_t start,
+      size_t end,
+      const size_t feature,
+      const bool mia_direction,
+      const std::variant<scalar_t, CatSet> threshold) const {
+    auto& target_data = std::get<std::vector<scalar_t>>(data[target]);
+    auto variance_helper = [&](size_t start, size_t end) -> scalar_t
+    {
+      size_t tot_size = (end - start);
+      if((end - start) == 0) return 0.0;
+      scalar_t sum = 0.0, sq_sum = 0.0;
+      for (size_t index = start; index < end; index++) {
+        sum += target_data[index];
+      }
+      scalar_t mean = sum / tot_size;
+      for (size_t index = start; index < end; index++) {
+        sq_sum += std::pow(target_data[index] - mean, 2);
+      }
+      return sq_sum / tot_size;
+    };
+    size_t mid = treeson::splitters::reorder_indices(
+        data, feature, mia_direction, threshold, start, end, indices);
+    return ((mid-start) * variance_helper(start, mid) + (end-mid) * variance_helper(mid,end)) / (end - start);
+  }
+public:
+  [[maybe_unused]] explicit ExtratreesStrategy(
+      const size_t target,
+      const size_t mtry = 1,
+      const size_t num_splits_per_feature = 1): target(target),
+        mtry(mtry), num_splits(num_splits_per_feature) {}
+  static constexpr size_t MAX_DEPTH = 100;
+  [[maybe_unused]] void select_split(
+      const std::vector<
+          std::variant<std::vector<integral_t>, std::vector<scalar_t>>> &data,
+      std::vector<size_t> &indices,
+      const std::vector<size_t> &available_features, size_t start, size_t end,
+      containers::Node<scalar_t, integral_t, MaxCategoricalSet> &node, RNG &rng) const {
+
+    if((mtry == 1) && (num_splits == 1)) {
+      const size_t feature =  available_features[
+          utils::select_from_range(available_features.size(), rng)];
+      node.featureIndex = feature;
+      auto [mia_direction, threshold] = std::visit(
+      RandomFeatureVisitor<scalar_t, integral_t, MaxCategoricalSet, RNG>{
+        data, feature, indices, start, end, rng}, data[feature]);
+      node.threshold = threshold;
+      node.missing_goes_right = mia_direction;
+    }
+    scalar_t best_score = std::numeric_limits<scalar_t>::max();
+    // for mtry features
+    for(size_t feat = 0; feat < mtry; feat++) {
+      // propose feature
+      const size_t feature =
+          available_features[utils::select_from_range(available_features.size(), rng)];
+      // and for num splits splits
+      for(size_t i = 0; i < num_splits; i++) {
+        // run visitor
+        auto [mia_direction, threshold] = std::visit(
+            RandomFeatureVisitor<scalar_t, integral_t, MaxCategoricalSet, RNG>{
+                data, feature, indices, start, end, rng}, data[feature]);
+
+        // compute RMSE - more generally score
+        scalar_t score = compute_score(data, indices, start, end,
+                                       feature, mia_direction, threshold);
+        // select best
+        if(score < best_score) {
+          best_score = score;
+          // we already have this memory, might as well use it for writes
+          node.featureIndex = feature;
+          node.threshold = threshold;
+          node.missing_goes_right = mia_direction;
+        }
+      }
+    }
   }
 };
 template <typename RNG, typename scalar_t = double,
@@ -2116,7 +2281,7 @@ public:
                                       nodes[nodeIndex], rng, parentIndex, depth);
       if(!did_split) goto end_fitting_tree;
     }
-    mid = reorder_indices(data, nodes[nodeIndex], start, end, indices);
+    mid = treeson::splitters::reorder_indices(data, nodes[nodeIndex], start, end, indices);
     // if a child node would be too small
     if (((mid - start) < minNodesize) || ((end - mid) < minNodesize) ||
         depth >= maxDepth) {
@@ -2162,7 +2327,7 @@ public:
       // there possibly an early return if splitting is rejected i.e. in mondrians
       if(!did_split) goto end_building_tree;
     }
-    mid = reorder_indices(data, nodes[nodeIndex], start, end, indices);
+    mid = treeson::splitters::reorder_indices(data, nodes[nodeIndex], start, end, indices);
     // if a child node would be too small
     if (((mid - start) <= minNodesize) || ((end - mid) <= minNodesize) ||
         depth >= maxDepth) {
@@ -2205,7 +2370,7 @@ public:
                 indices, start, end, results, excluded_feature, metric);
           }
         }
-        auto mid = reorder_indices(
+        auto mid = treeson::splitters::reorder_indices(
             oob_data, nodes[nodeIndex], start, end, indices);
         if (mid > start) {
           eval_oob_impl<Metric, false>(
@@ -2268,7 +2433,7 @@ public:
       }
       return;
     }
-    auto mid = reorder_indices(samples, nodes[nodeIndex], start, end, indices);
+    auto mid = treeson::splitters::reorder_indices(samples, nodes[nodeIndex], start, end, indices);
     if (mid > start) {
       predictSamples<FlattenResults>(
           node.left, samples,
@@ -2305,36 +2470,6 @@ public:
         left = (val <= numThreshold) || (std::isnan(val) && miss_dir);
     }
     travel(left ? node.left : node.right, data, indices, inner_id, pathway);
-  }
-
-  size_t reorder_indices(const std::vector<FeatureData>& data,
-                         const treeson::containers::Node<scalar_t, integral_t, MaxCategoricalSet>& node,
-                         const size_t start, const size_t end, std::vector<size_t>& indices) const {
-    auto& featureData = data[node.featureIndex];
-    const auto miss_dir = node.getMIADirection();
-    size_t mid = start;
-    if (node.isCategorical()) {
-      const auto &catSet = node.getCategoricalSet();
-      const auto &catData = std::get<std::vector<integral_t>>(featureData);
-      for (size_t i = start; i < end; ++i) {
-        const auto val = catData[indices[i]];
-        if (catSet.contains(val)) {
-          std::swap(indices[i], indices[mid]);
-          ++mid;
-        }
-      }
-    } else {
-      const auto &numThreshold = node.getNumericThreshold();
-      const auto &numData = std::get<std::vector<scalar_t>>(featureData);
-      for (size_t i = start; i < end; ++i) {
-        const auto val = numData[indices[i]];
-        if ((val <= numThreshold) || (std::isnan(val) && miss_dir)) {
-          std::swap(indices[i], indices[mid]);
-          ++mid;
-        }
-      }
-    }
-    return mid;
   }
 };
 template <typename ResultF, typename RNG, typename SplitStrategy,
@@ -2844,17 +2979,21 @@ std::vector<containers::TreePredictionResult<ResultType>> predict_from_file_mt(
       std::ifstream & in,
       const size_t n,
       const size_t actual_num_threads) const noexcept {
-    threading::ThreadPool pool(actual_num_threads);
     // shared resource to access the file
     threading::SharedResourceWrapper<std::ifstream> in_(std::move(in));
     threading::SharedResourceWrapper<Accumulator> accumulator_(accumulator);
-    for (size_t i = 0; i < n; i++) {
-      pool.enqueue([this, &accumulator_, &samples, &in_] {
-        TreeType tree(maxDepth, minNodesize, rng, terminalNodeFunc, strategy);
-        auto [nodes, values] = in_.deserialize(tree);
-        tree.from_nodes(std::move(nodes), std::move(values));
-        accumulator_(tree.predict(samples));
-      });
+    // wrap like this so we make sure the thread pool actually joins before we start deallocating
+    {
+      threading::ThreadPool pool(actual_num_threads);
+      for (size_t i = 0; i < n; i++) {
+        pool.enqueue([this, &accumulator_, &samples, &in_] {
+          TreeType tree(maxDepth, minNodesize, rng, terminalNodeFunc, strategy);
+          auto [nodes, values] = in_.deserialize(tree);
+          tree.from_nodes(std::move(nodes), std::move(values));
+          const auto prediction = tree.predict(samples);
+          accumulator_(prediction);
+        });
+      }
     }
   }
   template<typename Accumulator>
@@ -3536,3 +3675,5 @@ private:
 }
 
 #endif // TREESON_H
+
+#pragma clang diagnostic pop

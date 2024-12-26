@@ -13,12 +13,14 @@ ext_modules = [
     Pybind11Extension(
         'treeson',
         ['src/bindings.cpp'],
-        include_dirs = include_dirs),
+        include_dirs = include_dirs,
+        #extra_compile_args = ["-O0", "-ggdb"]
+        ),
 ]
 
 setup(
     name='treeson',
-    version='0.0.1',
+    version='0.1.1',
     author='JS',
     author_email='szitas.juraj13@example.com',
     description='Pybind11 bindings for treeson',

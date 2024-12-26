@@ -34,8 +34,9 @@ PYBIND11_MODULE(treeson, m) {
   py::arg("model_file"), py::arg("num_threads") = 04);
 
   py::class_<SingletargetRandomForest_t>(m, "SingletargetRandomForest")
-    .def(py::init<const size_t&, size_t, size_t, int>(),
-  py::arg("target"), py::arg("max_depth"), py::arg("min_nodesize"), py::arg("seed") = 42)
+    .def(py::init<const size_t&, size_t, size_t, size_t, size_t, int>(),
+  py::arg("target"), py::arg("max_depth"), py::arg("min_nodesize"),
+          py::arg("mtry") = 1, py::arg("num_splits") = 1, py::arg("seed") = 42)
 
     .def("fit", &SingletargetRandomForest_t::fit, py::arg("data"), py::arg("n_tree"),
     py::arg("resample") = true, py::arg("sample_size") = 0, py::arg("num_threads") = 0)
@@ -47,6 +48,8 @@ PYBIND11_MODULE(treeson, m) {
     py::arg("n_tree"), py::arg("file"), py::arg("resample") = true, py::arg("subsample_size") = 1024, py::arg("num_threads") = 0)
 
     .def("predict_from_file", &SingletargetRandomForest_t::predict_from_file, py::arg("samples"),
-    py::arg("model_file"), py::arg("num_threads") = 04);
+    py::arg("model_file"), py::arg("num_threads") = 0)
+    .def("save", &SingletargetRandomForest_t::save, py::arg("filename"))
+    .def("load", &SingletargetRandomForest_t::load, py::arg("filename"));
 
 }

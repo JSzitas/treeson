@@ -1,4 +1,4 @@
-# treeson
+# treeson 
 
 Simple, single header decision tree/random forest library. Intended to enable embedding ad-hoc data in terminal nodes of trees, creating custom splitters, and offering all this at very little performance loss. 
 

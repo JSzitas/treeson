@@ -4,6 +4,8 @@
 
 #include "../utils/tinyqr.h"
 
+#pragma clang diagnostic push
+#pragma ide diagnostic ignored "UnreachableCallsOfFunction"
 template <typename T> constexpr T cpow(T base, int exp) {
   if (exp == 0)
     return 1.0; // base case for zero exponent
@@ -19,6 +21,7 @@ template <typename T> constexpr T cpow(T base, int exp) {
   }
   return result;
 }
+#pragma clang diagnostic pop
 
 // Utility to compute power of 2 at compile time
 template<typename T> constexpr T cpow2(int n) {
@@ -169,7 +172,8 @@ constexpr double get_omega_bar() {
   }
   return sum;
 }
-template<const size_t n> constexpr std::array<double, n*n> make_A() {
+template<const size_t n>
+[[maybe_unused]] constexpr std::array<double, n*n> make_A() {
   constexpr std::array<double, n> scaling = get_scaling<n-1>();
   std::array<double, n * n> A{};
   for (int r = 0; r < n; ++r) {
@@ -180,7 +184,8 @@ template<const size_t n> constexpr std::array<double, n*n> make_A() {
   return A;
 }
 
-template<const size_t n> constexpr std::array<double, n> make_e0() {
+template<const size_t n>
+[[maybe_unused]] constexpr std::array<double, n> make_e0() {
   std::array<double, n> e0{};
   e0[0] = 1.0;
   return e0;

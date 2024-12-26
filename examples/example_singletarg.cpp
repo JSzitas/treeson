@@ -22,7 +22,7 @@ int main() {
   //CSVLoader<int, scalar_t>::load_data<true, false>("test_data/dr_test.csv", 10000);
   std::cout << "Done." << std::endl;
   //const std::vector<size_t> targets = {0,1,2,3};
-  SingletargetRandomForest<scalar_t, integral_t, 0> forest(0, 10, 12);
+  SingletargetRandomForest<scalar_t, integral_t, 0> forest(0, 10, 12, 41, 1);
 
   for(const size_t n_tree : {100, 500}){
       Stopwatch sw;
@@ -41,5 +41,23 @@ int main() {
                              res, std::get<std::vector<scalar_t>>(test_data[0])
                                  ) << std::endl;
   }
+  // test normal fit/predict
+  forest.fit(train_data, size_t(1000), false, size_t(1024));
+  const auto pred = forest.predict(test_data);
+  treeson::utils::print_vector(pred);
+  std::cout << " | Spearman: " <<
+      treeson::utils::spearman_correlation(
+          pred, std::get<std::vector<scalar_t>>(test_data[0])
+              ) <<
+      " Pearson: "
+            <<
+      treeson::utils::pearson_correlation(
+          pred, std::get<std::vector<scalar_t>>(test_data[0])
+              ) <<
+      " rmse: " << treeson::utils::rmse(
+                       pred, std::get<std::vector<scalar_t>>(test_data[0])
+                           ) << std::endl;
+
+
   return 0;
 }
